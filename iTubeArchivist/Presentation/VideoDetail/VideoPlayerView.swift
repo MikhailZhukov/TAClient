@@ -1,73 +1,80 @@
 import SwiftUI
 import AVKit
 
-struct VideoPlayerView: View {
+struct VideoPlayerView: UIViewControllerRepresentable {
     let asset: AVURLAsset?
     let startPosition: Double
     var onProgressUpdate: ((Double) -> Void)?
     var onDismiss: ((Double) -> Void)?
 
-    @State private var player: AVPlayer?
-    @State private var timeObserver: Any?
-    @State private var hasSetInitialPosition = false
-
-    var body: some View {
-        Group {
-            if let player {
-                VideoPlayer(player: player)
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                    .onDisappear {
-                        let currentTime = player.currentTime().seconds
-                        if currentTime.isFinite && currentTime > 0 {
-                            onDismiss?(currentTime)
-                        }
-                        cleanup()
-                    }
-            } else {
-                Color.black
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                    .overlay {
-                        ProgressView()
-                            .tint(.white)
-                    }
-            }
-        }
-        .onAppear {
-            setupPlayer()
-        }
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.allowsVideoFrameAnalysis = false
+        context.coordinator.setup(controller: controller, asset: asset, startPosition: startPosition)
+        return controller
     }
 
-    private func setupPlayer() {
-        guard let asset, player == nil else { return }
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {}
 
-        let playerItem = AVPlayerItem(asset: asset)
-        let avPlayer = AVPlayer(playerItem: playerItem)
-
-        // Seek to saved position
-        if startPosition > 0 {
-            let time = CMTime(seconds: startPosition, preferredTimescale: 600)
-            avPlayer.seek(to: time)
-        }
-
-        // Progress observer every 10 seconds
-        let interval = CMTime(seconds: 10, preferredTimescale: 600)
-        timeObserver = avPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
-            let seconds = time.seconds
-            if seconds.isFinite && seconds > 0 {
-                onProgressUpdate?(seconds)
-            }
-        }
-
-        self.player = avPlayer
-        avPlayer.play()
+    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: Coordinator) {
+        coordinator.tearDown()
     }
 
-    private func cleanup() {
-        if let observer = timeObserver {
-            player?.removeTimeObserver(observer)
-            timeObserver = nil
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onProgressUpdate: onProgressUpdate, onDismiss: onDismiss)
+    }
+
+    final class Coordinator {
+        private var onProgressUpdate: ((Double) -> Void)?
+        private var onDismiss: ((Double) -> Void)?
+        private var timeObserver: Any?
+        private weak var player: AVPlayer?
+
+        init(onProgressUpdate: ((Double) -> Void)?, onDismiss: ((Double) -> Void)?) {
+            self.onProgressUpdate = onProgressUpdate
+            self.onDismiss = onDismiss
         }
-        player?.pause()
-        player = nil
+
+        func setup(controller: AVPlayerViewController, asset: AVURLAsset?, startPosition: Double) {
+            guard let asset else { return }
+
+            let playerItem = AVPlayerItem(asset: asset)
+            let avPlayer = AVPlayer(playerItem: playerItem)
+            controller.player = avPlayer
+            self.player = avPlayer
+
+            if startPosition > 0 {
+                let time = CMTime(seconds: startPosition, preferredTimescale: 600)
+                avPlayer.seek(to: time)
+            }
+
+            let interval = CMTime(seconds: 10, preferredTimescale: 600)
+            timeObserver = avPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+                let seconds = time.seconds
+                if seconds.isFinite && seconds > 0 {
+                    self?.onProgressUpdate?(seconds)
+                }
+            }
+
+            avPlayer.play()
+        }
+
+        func tearDown() {
+            if let observer = timeObserver {
+                player?.removeTimeObserver(observer)
+                timeObserver = nil
+            }
+            let currentTime = player?.currentTime().seconds ?? 0
+            if currentTime.isFinite && currentTime > 0 {
+                onDismiss?(currentTime)
+            }
+            player?.pause()
+        }
+
+        deinit {
+            if let observer = timeObserver {
+                player?.removeTimeObserver(observer)
+            }
+        }
     }
 }

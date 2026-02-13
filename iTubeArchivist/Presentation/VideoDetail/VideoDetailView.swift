@@ -52,19 +52,10 @@ struct VideoDetailView: View {
 
     @ViewBuilder
     private func videoContent(_ video: Video) -> some View {
-        if viewModel.isPinned && isPlaying {
+        ScrollView {
             VStack(spacing: 0) {
                 playerArea(video)
-                ScrollView {
-                    videoDetails(video)
-                }
-            }
-        } else {
-            ScrollView {
-                VStack(spacing: 0) {
-                    playerArea(video)
-                    videoDetails(video)
-                }
+                videoDetails(video)
             }
         }
     }
@@ -72,29 +63,17 @@ struct VideoDetailView: View {
     @ViewBuilder
     private func playerArea(_ video: Video) -> some View {
         if isPlaying {
-            ZStack(alignment: .topTrailing) {
-                VideoPlayerView(
-                    asset: viewModel.playerAsset,
-                    startPosition: viewModel.startPosition,
-                    onProgressUpdate: { position in
-                        Task { await viewModel.saveProgress(position: position) }
-                    },
-                    onDismiss: { position in
-                        Task { await viewModel.saveProgress(position: position) }
-                        isPlaying = false
-                    }
-                )
-
-                Button {
-                    viewModel.isPinned.toggle()
-                } label: {
-                    Image(systemName: viewModel.isPinned ? "pin.fill" : "pin")
-                        .padding(8)
-                        .background(.ultraThinMaterial)
-                        .clipShape(Circle())
+            VideoPlayerView(
+                asset: viewModel.playerAsset,
+                startPosition: viewModel.startPosition,
+                onProgressUpdate: { position in
+                    Task { await viewModel.saveProgress(position: position) }
+                },
+                onDismiss: { position in
+                    Task { await viewModel.saveProgress(position: position) }
                 }
-                .padding(8)
-            }
+            )
+            .aspectRatio(16.0 / 9.0, contentMode: .fit)
         } else {
             // Thumbnail with play button
             ZStack {
