@@ -1,0 +1,83 @@
+import SwiftUI
+
+struct VideoListView: View {
+    @Bindable var viewModel: VideoListViewModel
+
+    var body: some View {
+        Group {
+            if viewModel.isLoading && viewModel.videos.isEmpty {
+                LoadingView()
+            } else if let error = viewModel.errorMessage, viewModel.videos.isEmpty {
+                ErrorView(message: error) {
+                    Task { await viewModel.refresh() }
+                }
+            } else if viewModel.videos.isEmpty {
+                Text(String(localized: "video_list_empty"))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 12) {
+                        SortFilterBar(
+                            sortOption: $viewModel.sortOption,
+                            sortAscending: $viewModel.sortAscending,
+                            watchFilter: $viewModel.watchFilter
+                        )
+
+                        AdaptiveVideoGrid(
+                            videos: viewModel.videos,
+                            onVideoTap: { videoId in
+                                viewModel.navigateToVideo(videoId)
+                            },
+                            onChannelTap: { channelId in
+                                viewModel.navigateToChannel(channelId)
+                            },
+                            onNearEnd: {
+                                Task { await viewModel.loadMoreIfNeeded() }
+                            }
+                        )
+
+                        if viewModel.isLoadingMore {
+                            ProgressView()
+                                .padding()
+                        }
+                    }
+                    .padding(.vertical)
+                }
+                .refreshable {
+                    await viewModel.refresh()
+                }
+            }
+        }
+        .navigationTitle(String(localized: "video_list_title"))
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                HStack(spacing: 16) {
+                    Button {
+                        viewModel.navigateToSearch()
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                    }
+
+                    Button {
+                        viewModel.logout()
+                    } label: {
+                        Image(systemName: "rectangle.portrait.and.arrow.right")
+                    }
+                }
+            }
+        }
+        .task {
+            await viewModel.loadVideos()
+        }
+        .onChange(of: viewModel.sortOption) {
+            Task { await viewModel.onSortOrFilterChanged() }
+        }
+        .onChange(of: viewModel.sortAscending) {
+            Task { await viewModel.onSortOrFilterChanged() }
+        }
+        .onChange(of: viewModel.watchFilter) {
+            Task { await viewModel.onSortOrFilterChanged() }
+        }
+    }
+}

@@ -1,32 +1,46 @@
-//
-//  iTubeArchivistApp.swift
-//  iTubeArchivist
-//
-//  Created by Mikhail Zhukov on 13.02.2026.
-//
-
 import SwiftUI
-import SwiftData
 
 @main
 struct iTubeArchivistApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    @State private var container = DependencyContainer.shared
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
+                .environment(container)
+                .environment(container.router)
+                .environment(container.authState)
         }
-        .modelContainer(sharedModelContainer)
+    }
+}
+
+struct RootView: View {
+    @Environment(AppRouter.self) private var router
+    @Environment(DependencyContainer.self) private var container
+
+    var body: some View {
+        @Bindable var router = router
+
+        Group {
+            if router.showLogin {
+                LoginView(viewModel: container.makeLoginViewModel())
+            } else {
+                NavigationStack(path: $router.path) {
+                    VideoListView(viewModel: container.makeVideoListViewModel())
+                        .navigationDestination(for: Route.self) { route in
+                            switch route {
+                            case .videoList:
+                                VideoListView(viewModel: container.makeVideoListViewModel())
+                            case .videoDetail(let videoId):
+                                VideoDetailView(viewModel: container.makeVideoDetailViewModel(videoId: videoId))
+                            case .search:
+                                SearchView(viewModel: container.makeSearchViewModel())
+                            case .channelDetail(let channelId):
+                                ChannelDetailView(viewModel: container.makeChannelDetailViewModel(channelId: channelId))
+                            }
+                        }
+                }
+            }
+        }
     }
 }

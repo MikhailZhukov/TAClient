@@ -1,0 +1,75 @@
+import SwiftUI
+
+struct LoginView: View {
+    @Bindable var viewModel: LoginViewModel
+
+    var body: some View {
+        Group {
+            if viewModel.isAutoLoginInProgress {
+                ProgressView()
+                    .scaleEffect(1.5)
+            } else {
+                loginForm
+            }
+        }
+        .task {
+            await viewModel.attemptAutoLogin()
+        }
+    }
+
+    private var loginForm: some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            Text("Tube Archivist")
+                .font(.largeTitle)
+                .fontWeight(.bold)
+
+            VStack(spacing: 16) {
+                TextField(String(localized: "login_server_url"), text: $viewModel.serverURL)
+                    .textFieldStyle(.roundedBorder)
+                    .textContentType(.URL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+
+                TextField(String(localized: "login_username"), text: $viewModel.username)
+                    .textFieldStyle(.roundedBorder)
+                    .textContentType(.username)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+
+                SecureField(String(localized: "login_password"), text: $viewModel.password)
+                    .textFieldStyle(.roundedBorder)
+                    .textContentType(.password)
+
+                if let error = viewModel.errorMessage {
+                    Text(error)
+                        .foregroundStyle(.red)
+                        .font(.caption)
+                        .multilineTextAlignment(.center)
+                }
+
+                Button {
+                    Task {
+                        await viewModel.login()
+                    }
+                } label: {
+                    if viewModel.isLoading {
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        Text(String(localized: "login_button"))
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isLoading)
+            }
+            .frame(maxWidth: 400)
+            .padding(.horizontal)
+
+            Spacer()
+        }
+    }
+}

@@ -1,0 +1,65 @@
+import Foundation
+
+@Observable
+final class SearchViewModel {
+    var query: String = ""
+    var videos: [Video] = []
+    var isLoading = false
+    var hasSearched = false
+
+    private var searchTask: Task<Void, Never>?
+    private let searchRepository: SearchRepositoryProtocol
+    private let router: AppRouter
+
+    init(searchRepository: SearchRepositoryProtocol, router: AppRouter) {
+        self.searchRepository = searchRepository
+        self.router = router
+    }
+
+    func onQueryChanged() {
+        searchTask?.cancel()
+
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            videos = []
+            hasSearched = false
+            return
+        }
+
+        searchTask = Task {
+            do {
+                try await Task.sleep(for: .milliseconds(300))
+            } catch {
+                return // cancelled
+            }
+
+            await performSearch()
+        }
+    }
+
+    private func performSearch() async {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else { return }
+
+        isLoading = true
+        do {
+            let result = try await searchRepository.search(query: trimmedQuery, page: 1)
+            if !Task.isCancelled {
+                videos = result.videos
+                hasSearched = true
+            }
+        } catch let error as AppError {
+            if case .unauthorized = error {
+                router.handleUnauthorized()
+            }
+        } catch {}
+        isLoading = false
+    }
+
+    func navigateToVideo(_ videoId: String) {
+        router.navigate(to: .videoDetail(videoId: videoId))
+    }
+
+    func navigateToChannel(_ channelId: String) {
+        router.navigate(to: .channelDetail(channelId: channelId))
+    }
+}
