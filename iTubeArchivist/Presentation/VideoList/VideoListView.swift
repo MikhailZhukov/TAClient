@@ -1,9 +1,11 @@
 import SwiftUI
 
 struct VideoListView: View {
-    @Bindable var viewModel: VideoListViewModel
+    @State var viewModel: VideoListViewModel
 
     var body: some View {
+        @Bindable var viewModel = viewModel
+
         Group {
             if viewModel.isLoading && viewModel.videos.isEmpty {
                 LoadingView()
@@ -68,7 +70,9 @@ struct VideoListView: View {
             }
         }
         .task {
-            await viewModel.loadVideos()
+            if viewModel.videos.isEmpty {
+                await viewModel.loadVideos()
+            }
         }
         .onChange(of: viewModel.sortOption) {
             Task { await viewModel.onSortOrFilterChanged() }
