@@ -51,8 +51,14 @@ struct VideoListView: View {
                 }
             }
         }
-        .navigationTitle(String(localized: "video_list_title"))
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Text(String(localized: "video_list_title"))
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .fixedSize()
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 16) {
                     Button {

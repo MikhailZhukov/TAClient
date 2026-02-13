@@ -1,15 +1,21 @@
 import SwiftUI
 
+enum AppState {
+    case splash
+    case login
+    case authenticated
+}
+
 @Observable
 final class AppRouter {
     var path = NavigationPath()
-    var showLogin = false
+    var appState: AppState
 
     private let authState: AuthState
 
     init(authState: AuthState) {
         self.authState = authState
-        self.showLogin = !authState.isAuthenticated
+        self.appState = authState.isAuthenticated ? .splash : .login
     }
 
     func navigate(to route: Route) {
@@ -24,11 +30,16 @@ final class AppRouter {
     func handleUnauthorized() {
         authState.handleUnauthorized()
         path = NavigationPath()
-        showLogin = true
+        appState = .login
     }
 
     func onLoginSuccess() {
-        showLogin = false
         path = NavigationPath()
+        appState = .authenticated
+    }
+
+    func onAutoLoginFailed() {
+        authState.handleUnauthorized()
+        appState = .login
     }
 }

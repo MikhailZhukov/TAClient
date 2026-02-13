@@ -7,34 +7,13 @@ final class LoginViewModel {
     var password: String = ""
     var isLoading: Bool = false
     var errorMessage: String?
-    var isAutoLoginInProgress: Bool = false
 
     private let authRepository: AuthRepositoryProtocol
-    private let authState: AuthState
     private let router: AppRouter
 
     init(authRepository: AuthRepositoryProtocol, authState: AuthState, router: AppRouter) {
         self.authRepository = authRepository
-        self.authState = authState
         self.router = router
-    }
-
-    func attemptAutoLogin() async {
-        guard authState.isAuthenticated else { return }
-        isAutoLoginInProgress = true
-        do {
-            let isValid = try await authRepository.ping()
-            if isValid {
-                router.onLoginSuccess()
-            } else {
-                authState.handleUnauthorized()
-            }
-        } catch is AppError {
-            authState.handleUnauthorized()
-        } catch {
-            authState.handleUnauthorized()
-        }
-        isAutoLoginInProgress = false
     }
 
     func login() async {

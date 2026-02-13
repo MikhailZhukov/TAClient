@@ -4,22 +4,12 @@ struct LoginView: View {
     @Bindable var viewModel: LoginViewModel
 
     var body: some View {
-        Group {
-            if viewModel.isAutoLoginInProgress {
-                ProgressView()
-                    .scaleEffect(1.5)
-            } else {
-                loginForm
-            }
-        }
-        .task {
-            await viewModel.attemptAutoLogin()
-        }
-    }
-
-    private var loginForm: some View {
         VStack(spacing: 20) {
             Spacer()
+
+            Image(systemName: "play.rectangle.fill")
+                .font(.system(size: 56))
+                .foregroundStyle(Color.accentColor)
 
             Text("Tube Archivist")
                 .font(.largeTitle)
