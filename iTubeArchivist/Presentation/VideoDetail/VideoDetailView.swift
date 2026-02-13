@@ -1,8 +1,11 @@
 import SwiftUI
+import AVKit
 
 struct VideoDetailView: View {
     @Bindable var viewModel: VideoDetailViewModel
     @State private var isPlaying = false
+    @State private var player: AVPlayer?
+    @State private var timeObserver: Any?
 
     var body: some View {
         Group {
@@ -20,10 +23,19 @@ struct VideoDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    viewModel.showDeleteDialog = true
-                } label: {
-                    Image(systemName: "trash")
+                HStack(spacing: 16) {
+                    if isPlaying {
+                        Button {
+                            viewModel.isPinned.toggle()
+                        } label: {
+                            Image(systemName: viewModel.isPinned ? "pin.fill" : "pin")
+                        }
+                    }
+                    Button {
+                        viewModel.showDeleteDialog = true
+                    } label: {
+                        Image(systemName: "trash")
+                    }
                 }
             }
         }
@@ -48,40 +60,41 @@ struct VideoDetailView: View {
         .task {
             await viewModel.loadComments()
         }
+        .onDisappear {
+            saveAndCleanup()
+        }
     }
+
+    // MARK: - Content
 
     @ViewBuilder
     private func videoContent(_ video: Video) -> some View {
         ScrollView {
-            VStack(spacing: 0) {
-                playerArea(video)
-                videoDetails(video)
+            LazyVStack(spacing: 0, pinnedViews: viewModel.isPinned ? [.sectionHeaders] : []) {
+                Section {
+                    videoDetails(video)
+                } header: {
+                    playerArea(video)
+                        .background(Color(uiColor: .systemBackground))
+                }
             }
         }
     }
 
+    // MARK: - Player
+
     @ViewBuilder
     private func playerArea(_ video: Video) -> some View {
-        if isPlaying {
-            VideoPlayerView(
-                asset: viewModel.playerAsset,
-                startPosition: viewModel.startPosition,
-                onProgressUpdate: { position in
-                    Task { await viewModel.saveProgress(position: position) }
-                },
-                onDismiss: { position in
-                    Task { await viewModel.saveProgress(position: position) }
-                }
-            )
-            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        if isPlaying, let player {
+            VideoPlayerView(player: player)
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
         } else {
-            // Thumbnail with play button
             ZStack {
                 AuthenticatedAsyncImage(url: video.thumbUrl)
                     .aspectRatio(16.0 / 9.0, contentMode: .fit)
 
                 Button {
-                    isPlaying = true
+                    startPlayback()
                 } label: {
                     Circle()
                         .fill(.black.opacity(0.6))
@@ -96,6 +109,8 @@ struct VideoDetailView: View {
         }
     }
 
+    // MARK: - Details
+
     @ViewBuilder
     private func videoDetails(_ video: Video) -> some View {
         VStack(spacing: 16) {
@@ -103,7 +118,6 @@ struct VideoDetailView: View {
                 viewModel.navigateToChannel(channelId)
             }
 
-            // Tabbed content: Description / Comments
             Picker("", selection: $viewModel.selectedTab) {
                 Text(String(localized: "video_detail_description")).tag(0)
                 Text(String(localized: "video_detail_comments")).tag(1)
@@ -129,5 +143,45 @@ struct VideoDetailView: View {
             }
         }
         .padding(.vertical)
+    }
+
+    // MARK: - Player Lifecycle
+
+    private func startPlayback() {
+        guard let asset = viewModel.playerAsset else { return }
+
+        let playerItem = AVPlayerItem(asset: asset)
+        let avPlayer = AVPlayer(playerItem: playerItem)
+
+        if viewModel.startPosition > 0 {
+            let time = CMTime(seconds: viewModel.startPosition, preferredTimescale: 600)
+            avPlayer.seek(to: time)
+        }
+
+        let interval = CMTime(seconds: 10, preferredTimescale: 600)
+        timeObserver = avPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+            let seconds = time.seconds
+            if seconds.isFinite && seconds > 0 {
+                Task { await viewModel.saveProgress(position: seconds) }
+            }
+        }
+
+        self.player = avPlayer
+        isPlaying = true
+        avPlayer.play()
+    }
+
+    private func saveAndCleanup() {
+        guard let player else { return }
+        if let observer = timeObserver {
+            player.removeTimeObserver(observer)
+            timeObserver = nil
+        }
+        let seconds = player.currentTime().seconds
+        if seconds.isFinite && seconds > 0 {
+            Task { await viewModel.saveProgress(position: seconds) }
+        }
+        player.pause()
+        self.player = nil
     }
 }
