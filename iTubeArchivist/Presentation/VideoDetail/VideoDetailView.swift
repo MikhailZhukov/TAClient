@@ -150,16 +150,20 @@ struct VideoDetailView: View {
     private func startPlayback() {
         guard let asset = viewModel.playerAsset else { return }
 
-        let playerItem = AVPlayerItem(asset: asset)
+        let playerItem = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: [.tracks, .duration])
+        playerItem.preferredForwardBufferDuration = 30
+
         let avPlayer = AVPlayer(playerItem: playerItem)
+        avPlayer.automaticallyWaitsToMinimizeStalling = true
 
         if viewModel.startPosition > 0 {
             let time = CMTime(seconds: viewModel.startPosition, preferredTimescale: 600)
             avPlayer.seek(to: time)
         }
 
+        let progressQueue = DispatchQueue(label: "progress", qos: .utility)
         let interval = CMTime(seconds: 10, preferredTimescale: 600)
-        timeObserver = avPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+        timeObserver = avPlayer.addPeriodicTimeObserver(forInterval: interval, queue: progressQueue) { [viewModel] time in
             let seconds = time.seconds
             if seconds.isFinite && seconds > 0 {
                 Task { await viewModel.saveProgress(position: seconds) }

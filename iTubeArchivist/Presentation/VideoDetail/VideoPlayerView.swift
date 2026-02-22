@@ -12,7 +12,9 @@ struct VideoPlayerView: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
-        controller.player = player
+        if controller.player !== player {
+            controller.player = player
+        }
     }
 
     static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: Coordinator) {
