@@ -91,11 +91,15 @@ struct VideoDetailView: View {
     private func playerArea(_ video: Video) -> some View {
         if let player = viewModel.player {
             VideoPlayerView(player: player, isFullScreen: $viewModel.isFullScreen)
-                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                .aspectRatio(16.0 / 9.0, contentMode: .fill)
+                .frame(maxWidth: .infinity)
+                .clipped()
         } else {
             ZStack {
                 AuthenticatedAsyncImage(url: video.thumbUrl)
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                    .aspectRatio(16.0 / 9.0, contentMode: .fill)
+                    .frame(maxWidth: .infinity)
+                    .clipped()
 
                 Button {
                     viewModel.startPlayback()
@@ -110,6 +114,7 @@ struct VideoDetailView: View {
                         }
                 }
             }
+            .aspectRatio(16.0 / 9.0, contentMode: .fit)
         }
     }
 

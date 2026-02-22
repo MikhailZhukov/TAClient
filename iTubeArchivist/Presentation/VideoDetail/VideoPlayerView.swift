@@ -43,7 +43,11 @@ struct VideoPlayerView: UIViewControllerRepresentable {
             willEndFullScreenPresentationWithAnimationCoordinator coordinator: UIViewControllerTransitionCoordinator
         ) {
             let wasPlaying = playerViewController.player?.timeControlStatus == .playing
-            coordinator.animate(alongsideTransition: nil) { [self] _ in
+            coordinator.animate(alongsideTransition: { _ in
+                if wasPlaying {
+                    playerViewController.player?.play()
+                }
+            }) { [self] _ in
                 isFullScreen.wrappedValue = false
                 if wasPlaying {
                     playerViewController.player?.play()
