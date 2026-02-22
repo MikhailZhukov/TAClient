@@ -151,10 +151,8 @@ struct VideoDetailView: View {
         guard let asset = viewModel.playerAsset else { return }
 
         let playerItem = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: [.tracks, .duration])
-        playerItem.preferredForwardBufferDuration = 30
 
         let avPlayer = AVPlayer(playerItem: playerItem)
-        avPlayer.automaticallyWaitsToMinimizeStalling = true
 
         if viewModel.startPosition > 0 {
             let time = CMTime(seconds: viewModel.startPosition, preferredTimescale: 600)
