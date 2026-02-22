@@ -2,6 +2,7 @@ import SwiftUI
 
 struct LoginView: View {
     @Bindable var viewModel: LoginViewModel
+    @FocusState private var serverURLFocused: Bool
 
     var body: some View {
         VStack(spacing: 20) {
@@ -22,6 +23,12 @@ struct LoginView: View {
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .keyboardType(.URL)
+                    .focused($serverURLFocused)
+                    .onChange(of: serverURLFocused) { _, focused in
+                        if focused && viewModel.serverURL.isEmpty {
+                            viewModel.serverURL = "https://"
+                        }
+                    }
 
                 TextField(String(localized: "login_username"), text: $viewModel.username)
                     .textFieldStyle(.roundedBorder)
