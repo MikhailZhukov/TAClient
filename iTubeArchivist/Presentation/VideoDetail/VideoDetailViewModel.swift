@@ -12,10 +12,15 @@ final class VideoDetailViewModel {
     var showDeleteDialog = false
     var selectedTab = 0
     var isPinned = false
+    var isFullScreen = false
+
+    private(set) var player: AVPlayer?
+    var isPlaying: Bool { player != nil }
 
     private let videoRepository: VideoRepositoryProtocol
     private let authState: AuthState
     private let router: AppRouter
+    private var timeObserver: Any?
 
     init(videoId: String, videoRepository: VideoRepositoryProtocol, authState: AuthState, router: AppRouter) {
         self.videoId = videoId
@@ -24,16 +29,54 @@ final class VideoDetailViewModel {
         self.router = router
     }
 
-    var playerAsset: AVURLAsset? {
-        guard let video, let url = URL(string: video.mediaUrl), let token = authState.token else { return nil }
-        return AVURLAsset(
+    var startPosition: Double {
+        video?.position ?? 0
+    }
+
+    func startPlayback() {
+        guard player == nil,
+              let video,
+              let url = URL(string: video.mediaUrl),
+              let token = authState.token else { return }
+
+        let asset = AVURLAsset(
             url: url,
             options: ["AVURLAssetHTTPHeaderFieldsKey": ["Authorization": "Token \(token)"]]
         )
+        let playerItem = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: [.tracks, .duration])
+        let avPlayer = AVPlayer(playerItem: playerItem)
+
+        if startPosition > 0 {
+            let time = CMTime(seconds: startPosition, preferredTimescale: 600)
+            avPlayer.seek(to: time)
+        }
+
+        let progressQueue = DispatchQueue(label: "progress", qos: .utility)
+        let interval = CMTime(seconds: 10, preferredTimescale: 600)
+        timeObserver = avPlayer.addPeriodicTimeObserver(forInterval: interval, queue: progressQueue) { [weak self] time in
+            guard let self else { return }
+            let seconds = time.seconds
+            if seconds.isFinite && seconds > 0 {
+                Task { await self.saveProgress(position: seconds) }
+            }
+        }
+
+        self.player = avPlayer
+        avPlayer.play()
     }
 
-    var startPosition: Double {
-        video?.position ?? 0
+    func stopPlayback() {
+        guard let player else { return }
+        if let observer = timeObserver {
+            player.removeTimeObserver(observer)
+            timeObserver = nil
+        }
+        let seconds = player.currentTime().seconds
+        if seconds.isFinite && seconds > 0 {
+            Task { await saveProgress(position: seconds) }
+        }
+        player.pause()
+        self.player = nil
     }
 
     func loadVideo() async {

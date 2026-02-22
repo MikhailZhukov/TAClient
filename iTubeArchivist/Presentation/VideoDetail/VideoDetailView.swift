@@ -3,9 +3,6 @@ import AVKit
 
 struct VideoDetailView: View {
     @Bindable var viewModel: VideoDetailViewModel
-    @State private var isPlaying = false
-    @State private var player: AVPlayer?
-    @State private var timeObserver: Any?
 
     var body: some View {
         Group {
@@ -24,7 +21,7 @@ struct VideoDetailView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 16) {
-                    if isPlaying {
+                    if viewModel.isPlaying {
                         Button {
                             viewModel.isPinned.toggle()
                         } label: {
@@ -61,7 +58,9 @@ struct VideoDetailView: View {
             await viewModel.loadComments()
         }
         .onDisappear {
-            saveAndCleanup()
+            if !viewModel.isFullScreen {
+                viewModel.stopPlayback()
+            }
         }
     }
 
@@ -69,13 +68,18 @@ struct VideoDetailView: View {
 
     @ViewBuilder
     private func videoContent(_ video: Video) -> some View {
-        ScrollView {
-            LazyVStack(spacing: 0, pinnedViews: viewModel.isPinned ? [.sectionHeaders] : []) {
-                Section {
+        if viewModel.isPinned {
+            VStack(spacing: 0) {
+                playerArea(video)
+                ScrollView {
                     videoDetails(video)
-                } header: {
+                }
+            }
+        } else {
+            ScrollView {
+                VStack(spacing: 0) {
                     playerArea(video)
-                        .background(Color(uiColor: .systemBackground))
+                    videoDetails(video)
                 }
             }
         }
@@ -85,8 +89,8 @@ struct VideoDetailView: View {
 
     @ViewBuilder
     private func playerArea(_ video: Video) -> some View {
-        if isPlaying, let player {
-            VideoPlayerView(player: player)
+        if let player = viewModel.player {
+            VideoPlayerView(player: player, isFullScreen: $viewModel.isFullScreen)
                 .aspectRatio(16.0 / 9.0, contentMode: .fit)
         } else {
             ZStack {
@@ -94,7 +98,7 @@ struct VideoDetailView: View {
                     .aspectRatio(16.0 / 9.0, contentMode: .fit)
 
                 Button {
-                    startPlayback()
+                    viewModel.startPlayback()
                 } label: {
                     Circle()
                         .fill(.black.opacity(0.6))
@@ -143,47 +147,5 @@ struct VideoDetailView: View {
             }
         }
         .padding(.vertical)
-    }
-
-    // MARK: - Player Lifecycle
-
-    private func startPlayback() {
-        guard let asset = viewModel.playerAsset else { return }
-
-        let playerItem = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: [.tracks, .duration])
-
-        let avPlayer = AVPlayer(playerItem: playerItem)
-
-        if viewModel.startPosition > 0 {
-            let time = CMTime(seconds: viewModel.startPosition, preferredTimescale: 600)
-            avPlayer.seek(to: time)
-        }
-
-        let progressQueue = DispatchQueue(label: "progress", qos: .utility)
-        let interval = CMTime(seconds: 10, preferredTimescale: 600)
-        timeObserver = avPlayer.addPeriodicTimeObserver(forInterval: interval, queue: progressQueue) { [viewModel] time in
-            let seconds = time.seconds
-            if seconds.isFinite && seconds > 0 {
-                Task { await viewModel.saveProgress(position: seconds) }
-            }
-        }
-
-        self.player = avPlayer
-        isPlaying = true
-        avPlayer.play()
-    }
-
-    private func saveAndCleanup() {
-        guard let player else { return }
-        if let observer = timeObserver {
-            player.removeTimeObserver(observer)
-            timeObserver = nil
-        }
-        let seconds = player.currentTime().seconds
-        if seconds.isFinite && seconds > 0 {
-            Task { await viewModel.saveProgress(position: seconds) }
-        }
-        player.pause()
-        self.player = nil
     }
 }
