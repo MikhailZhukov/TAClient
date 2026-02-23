@@ -94,6 +94,17 @@ struct VideoDetailView: View {
                 .aspectRatio(16.0 / 9.0, contentMode: .fill)
                 .frame(maxWidth: .infinity)
                 .clipped()
+        } else if let vlcURL = viewModel.vlcMediaURL {
+            VLCPlayerView(
+                mediaURL: vlcURL,
+                startPosition: viewModel.startPosition,
+                duration: Double(video.duration),
+                onTimeChanged: { seconds in viewModel.onVLCTimeChanged(seconds: seconds) },
+                isFullScreen: $viewModel.isFullScreen
+            )
+            .aspectRatio(16.0 / 9.0, contentMode: .fill)
+            .frame(maxWidth: .infinity)
+            .clipped()
         } else {
             ZStack {
                 AuthenticatedAsyncImage(url: video.thumbUrl)

@@ -15,12 +15,15 @@ final class VideoDetailViewModel {
     var isFullScreen = false
 
     private(set) var player: AVPlayer?
-    var isPlaying: Bool { player != nil }
+    private(set) var playerType: PlayerType = .avPlayer
+    private(set) var vlcMediaURL: URL?
+    var isPlaying: Bool { player != nil || vlcMediaURL != nil }
 
     private let videoRepository: VideoRepositoryProtocol
     private let authState: AuthState
     private let router: AppRouter
     private var timeObserver: Any?
+    private var authProxy: AuthProxy?
 
     init(videoId: String, videoRepository: VideoRepositoryProtocol, authState: AuthState, router: AppRouter) {
         self.videoId = videoId
@@ -34,8 +37,23 @@ final class VideoDetailViewModel {
     }
 
     func startPlayback() {
-        guard player == nil,
-              let video,
+        guard !isPlaying, let video else { return }
+
+        let requiredPlayer = CodecSupport.requiredPlayer(for: video.streams)
+        playerType = requiredPlayer
+
+        switch requiredPlayer {
+        case .avPlayer:
+            startAVPlayback()
+        case .vlcPlayer:
+            Task { await startVLCPlayback() }
+        }
+    }
+
+    // MARK: - AVPlayer
+
+    private func startAVPlayback() {
+        guard let video,
               let url = URL(string: video.mediaUrl),
               let token = authState.token else { return }
 
@@ -65,18 +83,61 @@ final class VideoDetailViewModel {
         avPlayer.play()
     }
 
-    func stopPlayback() {
-        guard let player else { return }
-        if let observer = timeObserver {
-            player.removeTimeObserver(observer)
-            timeObserver = nil
+    // MARK: - VLC Player
+
+    private func startVLCPlayback() async {
+        guard let video,
+              let url = URL(string: video.mediaUrl),
+              let token = authState.token,
+              let baseURL = authState.baseURL else { return }
+
+        let proxy = AuthProxy(token: token, serverBaseURL: baseURL)
+        do {
+            try await proxy.start()
+        } catch {
+            return
         }
-        let seconds = player.currentTime().seconds
-        if seconds.isFinite && seconds > 0 {
+
+        guard let proxyURL = await proxy.proxyURL(for: url) else {
+            await proxy.stop()
+            return
+        }
+
+        self.authProxy = proxy
+        self.vlcMediaURL = proxyURL
+    }
+
+    func onVLCTimeChanged(seconds: Double) {
+        if seconds > 0 {
             Task { await saveProgress(position: seconds) }
         }
-        player.pause()
-        self.player = nil
+    }
+
+    // MARK: - Stop
+
+    func stopPlayback() {
+        // Stop AVPlayer
+        if let player {
+            if let observer = timeObserver {
+                player.removeTimeObserver(observer)
+                timeObserver = nil
+            }
+            let seconds = player.currentTime().seconds
+            if seconds.isFinite && seconds > 0 {
+                Task { await saveProgress(position: seconds) }
+            }
+            player.pause()
+            self.player = nil
+        }
+
+        // Stop VLC
+        if vlcMediaURL != nil {
+            vlcMediaURL = nil
+            if let proxy = authProxy {
+                authProxy = nil
+                Task { await proxy.stop() }
+            }
+        }
     }
 
     func loadVideo() async {

@@ -112,6 +112,7 @@
 			);
 			name = iTubeArchivist;
 			packageProductDependencies = (
+				CC0000022F3FA4BE00000002 /* MobileVLCKit */,
 			);
 			productName = iTubeArchivist;
 			productReference = 27D79B162F3FA4BE00E87BCA /* iTubeArchivist.app */;
@@ -197,6 +198,9 @@
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 27D79B172F3FA4BE00E87BCA /* Products */;
+			packageReferences = (
+				CC0000012F3FA4BE00000001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM" */,
+			);
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -580,6 +584,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		CC0000012F3FA4BE00000001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/MobileVLCKit-SPM/MobileVLCKit-SPM";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.5.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		CC0000022F3FA4BE00000002 /* MobileVLCKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CC0000012F3FA4BE00000001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM" */;
+			productName = MobileVLCKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 27D79B0E2F3FA4BE00E87BCA /* Project object */;
 }
