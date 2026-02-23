@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. Pure SwiftUI, no third-party dependencies.
+iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support.
 
 ## Build & Run
 
@@ -19,14 +19,15 @@ iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearch
 - Xcode 26.2, iOS 26.2 deployment target
 - Swift concurrency: `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, `SWIFT_APPROACHABLE_CONCURRENCY = YES`
 - String Catalog localization (en + ru) via `Localizable.xcstrings`
+- SPM dependency: `MobileVLCKit-SPM` (`https://github.com/MobileVLCKit-SPM/MobileVLCKit-SPM`)
 
 ## Architecture
 
 Clean Architecture with three layers, all under `iTubeArchivist/`:
 
 ```
-Domain/    → Models, Repository protocols, AppError
-Data/      → APIClient, DTOs, Mappers (DTO→Model), KeychainService, AuthState, Repository impls
+Domain/    → Models, Repository protocols, AppError, CodecSupport
+Data/      → APIClient, DTOs, Mappers (DTO→Model), KeychainService, AuthState, AuthProxy, Repository impls
 Presentation/ → Views + @Observable ViewModels per screen, Common components
 DI/        → DependencyContainer (manual singleton)
 ```
@@ -40,12 +41,26 @@ DI/        → DependencyContainer (manual singleton)
 - `AuthState` (@Observable) wraps Keychain reads/writes for token + serverURL
 - Unauthorized (401/403) responses trigger `router.handleUnauthorized()` which clears Keychain and returns to login
 
+## Video Playback
+
+Two player paths, selected automatically by `CodecSupport.requiredPlayer(for:)`:
+
+- **AVPlayer** (default) — `AVPlayerViewController` via UIViewControllerRepresentable, inline in `VideoDetailView`. Handles H.264/H.265/AV1. Auth via `AVURLAssetHTTPHeaderFieldsKey`.
+- **VLCKit** (fallback for VP8/VP9) — `VLCPlayerView` UIViewControllerRepresentable with custom `VLCPlayerControls` SwiftUI overlay. Auth via `AuthProxy` (local NWListener HTTP proxy that injects `Authorization` header, since VLCKit doesn't support custom headers).
+
+**Key details:**
+- `CodecSupport` only routes VP8/VP9 video codecs to VLC — AV1 and opus are AVPlayer-supported
+- `AuthProxy` is an actor using Network.framework `NWListener` on port 0 (OS-assigned). Must set `newConnectionHandler` BEFORE `listener.start()`
+- VLC controls: UIHostingController intercepts all touches — tap handling must be in SwiftUI layer (`Color.clear.contentShape(Rectangle()).onTapGesture`)
+- VLC fullscreen: modal `VLCFullScreenVC` reparents BOTH drawable view (`insertSubview(at: 0)`) AND controls host view
+- Progress saved every 10s; VLC also saves on stop via `lastVLCPosition`
+
 ## API Details
 
 - Server URL is user-provided and dynamic
 - **2-step login:** POST `/api/user/login/` (returns session cookie) → GET `/api/appsettings/token/` (returns token)
 - Auth header on all subsequent requests: `Authorization: Token {token}`
+- **CSRF gotcha:** API session must have `httpCookieStorage = nil` — otherwise the login session cookie leaks into API requests, Django uses `SessionAuthentication` instead of `TokenAuthentication`, and POST requests fail with 403 (CSRF required)
 - All image/media URLs from API are **relative paths** — mappers prepend the server base URL
-- Video playback uses `AVURLAsset` with auth headers via `AVURLAssetHTTPHeaderFieldsKey`
 - Search param is `query` (not `q`): `GET /api/search/?query=X&page=N`
 - Localization keys use `snake_case`; formatted dates use non-breaking spaces (`\u{00A0}`)
