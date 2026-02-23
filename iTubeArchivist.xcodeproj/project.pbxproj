@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		2743D9EB2F4C515900A7114D /* MobileVLCKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC0000022F3FA4BE00000002 /* MobileVLCKit */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		27D79B262F3FA4C100E87BCA /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2743D9EB2F4C515900A7114D /* MobileVLCKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -196,11 +201,11 @@
 			);
 			mainGroup = 27D79B0D2F3FA4BE00E87BCA;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 77;
-			productRefGroup = 27D79B172F3FA4BE00E87BCA /* Products */;
 			packageReferences = (
 				CC0000012F3FA4BE00000001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM" */,
 			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 27D79B172F3FA4BE00E87BCA /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
