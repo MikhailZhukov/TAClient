@@ -1,5 +1,8 @@
 import Foundation
 import AVFoundation
+import OSLog
+
+private let logger = Logger(subsystem: "ru.mzhukov.iTubeArchivist", category: "VideoDetail")
 
 @Observable
 final class VideoDetailViewModel {
@@ -178,7 +181,7 @@ final class VideoDetailViewModel {
         do {
             try await videoRepository.updateProgress(videoId: videoId, position: position)
         } catch {
-            print("[Progress] Failed to save position \(Int(position))s for \(videoId): \(error)")
+            logger.error("Failed to save position \(Int(position))s for \(self.videoId): \(error.localizedDescription)")
         }
     }
 

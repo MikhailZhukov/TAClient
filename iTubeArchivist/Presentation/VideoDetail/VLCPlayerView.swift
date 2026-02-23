@@ -1,5 +1,8 @@
 import SwiftUI
 import MobileVLCKit
+import OSLog
+
+private let logger = Logger(subsystem: "ru.mzhukov.iTubeArchivist", category: "VLCPlayer")
 
 struct VLCPlayerView: UIViewControllerRepresentable {
     let mediaURL: URL
@@ -63,7 +66,7 @@ extension VLCPlayerView {
             Task { @MainActor in
                 self.containerVC?.updatePlayingState(player.isPlaying)
                 if state == .error || state == .ended {
-                    print("[VLC] Player state: \(state == .error ? "error" : "ended"), attempting restart")
+                    logger.error("Player state: \(state == .error ? "error" : "ended"), attempting restart")
                     self.containerVC?.restartMedia()
                 }
             }
