@@ -6,6 +6,7 @@ actor AuthProxy {
     private var port: UInt16 = 0
     private let token: String
     private let serverBaseURL: URL
+    private var proxySession: URLSession?
 
     var localPort: UInt16 { port }
 
@@ -15,6 +16,11 @@ actor AuthProxy {
     }
 
     func start() async throws {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 0
+        config.timeoutIntervalForResource = 0
+        self.proxySession = URLSession(configuration: config)
+
         let params = NWParameters.tcp
         params.acceptLocalOnly = true
         let listener = try NWListener(using: params, on: .any)
@@ -49,13 +55,38 @@ actor AuthProxy {
             throw AppError.unknown(message: "AuthProxy failed to bind")
         }
 
+        // Monitor listener state after start
+        listener.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed(let error):
+                print("[AuthProxy] Listener failed: \(error)")
+                Task { await self?.restartListener() }
+            case .cancelled:
+                print("[AuthProxy] Listener cancelled")
+            default:
+                break
+            }
+        }
+
         self.listener = listener
         self.port = assignedPort
+    }
+
+    private func restartListener() {
+        guard listener != nil else { return }
+        print("[AuthProxy] Attempting restart...")
+        listener?.cancel()
+        listener = nil
+        Task {
+            try? await start()
+        }
     }
 
     func stop() {
         listener?.cancel()
         listener = nil
+        proxySession?.invalidateAndCancel()
+        proxySession = nil
         port = 0
     }
 
@@ -127,10 +158,10 @@ actor AuthProxy {
 
         // Stream response to avoid loading entire video into memory
         do {
-            let config = URLSessionConfiguration.default
-            config.timeoutIntervalForRequest = 300
-            let session = URLSession(configuration: config)
-            defer { session.invalidateAndCancel() }
+            guard let session = proxySession else {
+                Self.sendError(connection, code: 502)
+                return
+            }
 
             let (asyncBytes, response) = try await session.bytes(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
@@ -194,6 +225,7 @@ actor AuthProxy {
                 connection.cancel()
             })
         } catch {
+            print("[AuthProxy] Stream error: \(error)")
             Self.sendError(connection, code: 502)
         }
     }

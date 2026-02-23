@@ -59,8 +59,13 @@ extension VLCPlayerView {
 
         func mediaPlayerStateChanged(_ aNotification: Notification) {
             guard let player = aNotification.object as? VLCMediaPlayer else { return }
+            let state = player.state
             Task { @MainActor in
                 self.containerVC?.updatePlayingState(player.isPlaying)
+                if state == .error || state == .ended {
+                    print("[VLC] Player state: \(state == .error ? "error" : "ended"), attempting restart")
+                    self.containerVC?.restartMedia()
+                }
             }
         }
     }
@@ -116,6 +121,24 @@ class VLCPlayerContainerVC: UIViewController {
         hideTimer = nil
         mediaPlayer?.stop()
         mediaPlayer = nil
+    }
+
+    func restartMedia() {
+        let resumePosition = currentTime
+        mediaPlayer?.stop()
+
+        let media = VLCMedia(url: mediaURL)
+        media.addOptions(["network-caching": 3000])
+        mediaPlayer?.media = media
+        mediaPlayer?.play()
+
+        if resumePosition > 0, currentDuration > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, let player = self.mediaPlayer else { return }
+                let position = Float(resumePosition / self.currentDuration)
+                player.position = min(max(position, 0), 1)
+            }
+        }
     }
 
     // MARK: - Setup
