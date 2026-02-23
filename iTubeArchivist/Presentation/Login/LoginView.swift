@@ -8,13 +8,10 @@ struct LoginView: View {
         VStack(spacing: 20) {
             Spacer()
 
-            Image(systemName: "play.rectangle.fill")
-                .font(.system(size: 56))
-                .foregroundStyle(Color.accentColor)
-
-            Text("Tube Archivist")
-                .font(.largeTitle)
-                .fontWeight(.bold)
+            Image("SplashLogo")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 100, height: 100)
 
             VStack(spacing: 16) {
                 TextField(String(localized: "login_server_url"), text: $viewModel.serverURL)

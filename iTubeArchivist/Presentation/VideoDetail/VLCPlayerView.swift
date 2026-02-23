@@ -163,10 +163,10 @@ class VLCPlayerContainerVC: UIViewController {
         addChild(host)
         view.addSubview(host.view)
         NSLayoutConstraint.activate([
-            host.view.topAnchor.constraint(equalTo: view.topAnchor),
-            host.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            host.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            host.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            host.view.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+            host.view.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
         ])
         host.didMove(toParent: self)
         controlsHost = host
@@ -295,11 +295,12 @@ private class VLCFullScreenVC: UIViewController {
         controlsView.removeFromSuperview()
         controlsView.translatesAutoresizingMaskIntoConstraints = false
         targetView.addSubview(controlsView)
+        let guide = targetView.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            controlsView.topAnchor.constraint(equalTo: targetView.topAnchor),
-            controlsView.bottomAnchor.constraint(equalTo: targetView.bottomAnchor),
-            controlsView.leadingAnchor.constraint(equalTo: targetView.leadingAnchor),
-            controlsView.trailingAnchor.constraint(equalTo: targetView.trailingAnchor),
+            controlsView.topAnchor.constraint(equalTo: guide.topAnchor),
+            controlsView.bottomAnchor.constraint(equalTo: guide.bottomAnchor),
+            controlsView.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
+            controlsView.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
         ])
     }
 }

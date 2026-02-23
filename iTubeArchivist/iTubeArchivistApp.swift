@@ -23,12 +23,20 @@ struct RootView: View {
 
         switch router.appState {
         case .splash:
-            SplashView()
-                .task {
-                    await autoLogin()
-                }
+            NavigationStack {
+                SplashView()
+                    .navigationTitle("Tube Archivist")
+                    .navigationBarTitleDisplayMode(.inline)
+            }
+            .task {
+                await autoLogin()
+            }
         case .login:
-            LoginView(viewModel: container.makeLoginViewModel())
+            NavigationStack {
+                LoginView(viewModel: container.makeLoginViewModel())
+                    .navigationTitle("Tube Archivist")
+                    .navigationBarTitleDisplayMode(.inline)
+            }
         case .authenticated:
             NavigationStack(path: $router.path) {
                 VideoListView(viewModel: container.makeVideoListViewModel())

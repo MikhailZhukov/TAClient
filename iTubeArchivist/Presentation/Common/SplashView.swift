@@ -10,10 +10,6 @@ struct SplashView: View {
                 .scaledToFit()
                 .frame(width: 120, height: 120)
 
-            Text("Tube Archivist")
-                .font(.largeTitle)
-                .fontWeight(.bold)
-
             ProgressView()
                 .controlSize(.regular)
 
