@@ -10,6 +10,7 @@ final class APIClient {
 
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
+        config.httpCookieStorage = nil
         self.session = URLSession(configuration: config)
 
         let loginConfig = URLSessionConfiguration.default

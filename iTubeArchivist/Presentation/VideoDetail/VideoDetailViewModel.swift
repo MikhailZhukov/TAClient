@@ -23,7 +23,9 @@ final class VideoDetailViewModel {
     private let authState: AuthState
     private let router: AppRouter
     private var timeObserver: Any?
+    private var progressQueue = DispatchQueue(label: "progress", qos: .utility)
     private var authProxy: AuthProxy?
+    private var lastVLCPosition: Double = 0
 
     init(videoId: String, videoRepository: VideoRepositoryProtocol, authState: AuthState, router: AppRouter) {
         self.videoId = videoId
@@ -69,7 +71,6 @@ final class VideoDetailViewModel {
             avPlayer.seek(to: time)
         }
 
-        let progressQueue = DispatchQueue(label: "progress", qos: .utility)
         let interval = CMTime(seconds: 10, preferredTimescale: 600)
         timeObserver = avPlayer.addPeriodicTimeObserver(forInterval: interval, queue: progressQueue) { [weak self] time in
             guard let self else { return }
@@ -109,6 +110,7 @@ final class VideoDetailViewModel {
 
     func onVLCTimeChanged(seconds: Double) {
         if seconds > 0 {
+            lastVLCPosition = seconds
             Task { await saveProgress(position: seconds) }
         }
     }
@@ -132,7 +134,12 @@ final class VideoDetailViewModel {
 
         // Stop VLC
         if vlcMediaURL != nil {
+            if lastVLCPosition > 0 {
+                let position = lastVLCPosition
+                Task { await saveProgress(position: position) }
+            }
             vlcMediaURL = nil
+            lastVLCPosition = 0
             if let proxy = authProxy {
                 authProxy = nil
                 Task { await proxy.stop() }
@@ -170,7 +177,9 @@ final class VideoDetailViewModel {
     func saveProgress(position: Double) async {
         do {
             try await videoRepository.updateProgress(videoId: videoId, position: position)
-        } catch {}
+        } catch {
+            print("[Progress] Failed to save position \(Int(position))s for \(videoId): \(error)")
+        }
     }
 
     func deleteVideo() async {
