@@ -5,9 +5,10 @@ struct SplashView: View {
         VStack(spacing: 24) {
             Spacer()
 
-            Image(systemName: "play.rectangle.fill")
-                .font(.system(size: 72))
-                .foregroundStyle(Color.accentColor)
+            Image("SplashLogo")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 120, height: 120)
 
             Text("Tube Archivist")
                 .font(.largeTitle)
