@@ -56,11 +56,13 @@ struct VideoCardView: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
-            // Title
+            // Title (fixed height for uniform grid rows)
             Text(video.title)
                 .font(.subheadline)
                 .fontWeight(.medium)
                 .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: UIFont.preferredFont(forTextStyle: .subheadline).lineHeight * 2 + 4)
 
             // Channel info
             HStack(spacing: 8) {
