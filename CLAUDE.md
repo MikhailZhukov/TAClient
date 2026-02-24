@@ -28,6 +28,7 @@ Clean Architecture with three layers, all under `iTubeArchivist/`:
 ```
 Domain/    → Models, Repository protocols, AppError, CodecSupport
 Data/      → APIClient, DTOs, Mappers (DTO→Model), KeychainService, AuthState, AuthProxy, Repository impls
+Data/Cache → VideoCache (in-memory sliding window), CachingResourceLoader (AVAssetResourceLoaderDelegate)
 Presentation/ → Views + @Observable ViewModels per screen, Common components
 DI/        → DependencyContainer (manual singleton)
 ```
@@ -45,8 +46,17 @@ DI/        → DependencyContainer (manual singleton)
 
 Two player paths, selected automatically by `CodecSupport.requiredPlayer(for:)`:
 
-- **AVPlayer** (default) — `AVPlayerViewController` via UIViewControllerRepresentable, inline in `VideoDetailView`. Handles H.264/H.265/AV1. Auth via `AVURLAssetHTTPHeaderFieldsKey`.
+- **AVPlayer** (default) — `AVPlayerViewController` via UIViewControllerRepresentable, inline in `VideoDetailView`. Handles H.264/H.265/AV1. Auth via `CachingResourceLoader` (custom `itacache://` URL scheme); fallback to `AVURLAssetHTTPHeaderFieldsKey` if URL conversion fails.
 - **VLCKit** (fallback for VP8/VP9) — `VLCPlayerView` UIViewControllerRepresentable with custom `VLCPlayerControls` SwiftUI overlay. Auth via `AuthProxy` (local NWListener HTTP proxy that injects `Authorization` header, since VLCKit doesn't support custom headers).
+
+**In-memory video cache (`Data/Cache/`):**
+- `VideoCache` actor singleton — sliding window of 512KB `[Data]` chunks, single video at a time
+- `CachingResourceLoader` (`AVAssetResourceLoaderDelegate`) — serves AVPlayer byte-range requests from cache, falls back to network (16MB cap per request)
+- Preload starts on `loadVideo()` before user presses play; uses `startPosition`/`duration` to seek via HTTP Range header
+- Sliding window: 256MB max cache, trim at 282MB, pause download at 384MB, 30MB behind-margin for keyframe refs
+- Trim position tracked from ViewModel's time observer (every 10s) — NOT from resource loader reads (AVPlayer read-ahead would cause trim overshoot)
+- All cache URLSessions use `httpCookieStorage = nil` + `urlCache = nil`
+- Do NOT set `automaticallyWaitsToMinimizeStalling` or `preferredForwardBufferDuration` on AVPlayer — both caused playback issues
 
 **Key details:**
 - `CodecSupport` only routes VP8/VP9 video codecs to VLC — AV1 and opus are AVPlayer-supported
