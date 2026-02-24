@@ -23,6 +23,7 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
 
         let config = URLSessionConfiguration.default
         config.httpCookieStorage = nil
+        config.urlCache = nil
         self.networkSession = URLSession(configuration: config)
 
         super.init()

@@ -81,7 +81,6 @@ final class VideoDetailViewModel {
         }
 
         let playerItem = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: [.tracks, .duration])
-        playerItem.preferredForwardBufferDuration = 3  // start with less buffer — cache fills fast
         let avPlayer = AVPlayer(playerItem: playerItem)
 
         if startPosition > 0 {
@@ -99,7 +98,10 @@ final class VideoDetailViewModel {
             let seconds = time.seconds
             if seconds.isFinite && seconds > 0 {
                 self.logCacheHealth(videoId: cachedVideoId, playbackPosition: seconds, duration: Double(duration))
-                Task { await self.saveProgress(position: seconds) }
+                Task {
+                    await VideoCache.shared.updatePlaybackPosition(videoId: cachedVideoId, seconds: seconds, duration: Double(duration))
+                    await self.saveProgress(position: seconds)
+                }
             }
         }
 

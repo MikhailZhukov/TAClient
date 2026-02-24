@@ -8,22 +8,23 @@ actor VideoCache {
 
     private static let maxCacheSize = 256_000_000    // 256 MB sliding window
     private static let trimThreshold = 282_000_000   // trim when cache exceeds this (~10% over max)
-    private static let minTrimSize = 10_000_000      // don't bother trimming less than 10 MB (avoid COW churn)
+    private static let minTrimSize = 10_000_000      // don't bother trimming less than 10 MB
     private static let pauseThreshold = 384_000_000  // pause download when cache exceeds this (1.5x max)
     private static let behindMargin = 30_000_000     // keep 30 MB behind playback for keyframe/audio refs
     private static let chunkSize = 512 * 1024        // 512 KB
 
     struct CacheEntry {
         let videoId: String
-        var data: Data
-        var startOffset: Int64            // byte offset where data begins in the file
+        var chunks: [Data]                // array of fixed-size chunks (each up to chunkSize)
+        var cachedByteCount: Int = 0      // total bytes across all chunks
+        var startOffset: Int64            // byte offset where first chunk begins in the file
         var totalSize: Int64
         var contentType: String
     }
 
     private var entry: CacheEntry?
     private var preloadTask: Task<Void, Never>?
-    private var lastPlaybackOffset: Int64 = 0       // updated by resource loader reads
+    private var lastPlaybackOffset: Int64 = 0       // updated by ViewModel based on actual playback time
     private var memoryPressureSource: (any DispatchSourceMemoryPressure)?
 
     private init() {
@@ -40,10 +41,10 @@ actor VideoCache {
 
     func startPreload(videoId: String, url: URL, token: String, startPosition: Double = 0, duration: Double = 0) {
         // Skip if cache already covers the requested start position
-        if let entry, entry.videoId == videoId, entry.data.count > 0, duration > 0 {
+        if let entry, entry.videoId == videoId, entry.cachedByteCount > 0, duration > 0 {
             let avgByterate = Double(entry.totalSize) / duration
             let requestedByte = Int64(startPosition * avgByterate)
-            let cacheEnd = entry.startOffset + Int64(entry.data.count)
+            let cacheEnd = entry.startOffset + Int64(entry.cachedByteCount)
             if requestedByte >= entry.startOffset && requestedByte < cacheEnd {
                 if isPreloading(videoId: videoId) {
                     logger.info("Preload for \(videoId) already active, skipping")
@@ -81,22 +82,42 @@ actor VideoCache {
         guard let entry, entry.videoId == videoId else { return nil }
 
         let relativeOffset = Int(offset - entry.startOffset)
-        guard relativeOffset >= 0, relativeOffset < entry.data.count else { return nil }
+        guard relativeOffset >= 0, relativeOffset < entry.cachedByteCount else { return nil }
 
-        // Track highest read offset as proxy for playback position
-        if offset > lastPlaybackOffset {
-            lastPlaybackOffset = offset
+        let end = min(relativeOffset + length, entry.cachedByteCount)
+        let bytesNeeded = end - relativeOffset
+
+        var result = Data(capacity: bytesNeeded)
+        var remaining = bytesNeeded
+        var currentOffset = relativeOffset
+
+        while remaining > 0 {
+            let chunkIndex = currentOffset / Self.chunkSize
+            let offsetInChunk = currentOffset % Self.chunkSize
+
+            guard chunkIndex < entry.chunks.count else { break }
+            let chunk = entry.chunks[chunkIndex]
+            guard offsetInChunk < chunk.count else { break }
+
+            let available = min(remaining, chunk.count - offsetInChunk)
+            result.append(chunk[offsetInChunk..<(offsetInChunk + available)])
+
+            remaining -= available
+            currentOffset += available
         }
 
-        let end = min(relativeOffset + length, entry.data.count)
-        // Copy to independent Data — avoids COW on the entire cache buffer
-        // when AVPlayer holds a reference while we append/trim
-        return Data(entry.data[relativeOffset..<end])
+        return result.isEmpty ? nil : result
     }
 
     func cacheStatus(videoId: String) -> (startOffset: Int64, endOffset: Int64, totalSize: Int64, contentType: String)? {
         guard let entry, entry.videoId == videoId else { return nil }
-        return (entry.startOffset, entry.startOffset + Int64(entry.data.count), entry.totalSize, entry.contentType)
+        return (entry.startOffset, entry.startOffset + Int64(entry.cachedByteCount), entry.totalSize, entry.contentType)
+    }
+
+    func updatePlaybackPosition(videoId: String, seconds: Double, duration: Double) {
+        guard let entry, entry.videoId == videoId, duration > 0 else { return }
+        let avgByterate = Double(entry.totalSize) / duration
+        lastPlaybackOffset = Int64(seconds * avgByterate)
     }
 
     func isPreloading(videoId: String) -> Bool {
@@ -113,19 +134,25 @@ actor VideoCache {
 
     // MARK: - Trim
 
-    /// Trim data well behind playback position. Skips if trim would be < 10 MB (avoids COW churn).
+    /// Drop complete chunks well behind playback position. O(1) per chunk — no large memmove.
     private func trimFront(videoId: String) {
         guard let entry, entry.videoId == videoId else { return }
         let safeTrimBound = lastPlaybackOffset - Int64(Self.behindMargin)
-        let maxTrim = Int(safeTrimBound - entry.startOffset)
-        guard maxTrim >= Self.minTrimSize else { return }
+        let maxTrimBytes = Int(safeTrimBound - entry.startOffset)
+        guard maxTrimBytes >= Self.minTrimSize else { return }
 
-        let trimAmount = min(maxTrim, entry.data.count - Self.maxCacheSize)
-        guard trimAmount >= Self.minTrimSize else { return }
+        let trimBytes = min(maxTrimBytes, entry.cachedByteCount - Self.maxCacheSize)
+        guard trimBytes >= Self.minTrimSize else { return }
 
-        self.entry?.data.removeSubrange(0..<trimAmount)
-        self.entry?.startOffset += Int64(trimAmount)
-        logger.info("Trimmed \(trimAmount / 1_000_000)MB from front of \(videoId)")
+        // Remove complete chunks from front
+        let chunksToRemove = trimBytes / Self.chunkSize
+        guard chunksToRemove > 0 else { return }
+
+        let bytesRemoved = entry.chunks.prefix(chunksToRemove).reduce(0) { $0 + $1.count }
+        self.entry?.chunks.removeFirst(chunksToRemove)
+        self.entry?.cachedByteCount -= bytesRemoved
+        self.entry?.startOffset += Int64(bytesRemoved)
+        logger.info("Trimmed \(bytesRemoved / 1_000_000)MB from front of \(videoId)")
     }
 
     // MARK: - Download
@@ -133,6 +160,7 @@ actor VideoCache {
     private func downloadVideo(videoId: String, url: URL, token: String, startPosition: Double, duration: Double) async {
         let config = URLSessionConfiguration.default
         config.httpCookieStorage = nil
+        config.urlCache = nil  // prevent response caching — we manage our own cache
         let session = URLSession(configuration: config)
 
         var byteOffset: Int64 = 0
@@ -183,12 +211,10 @@ actor VideoCache {
 
             let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "video/mp4"
 
-            var cacheData = Data()
-            cacheData.reserveCapacity(Self.trimThreshold)  // pre-allocate to avoid reallocation spikes
-
             entry = CacheEntry(
                 videoId: videoId,
-                data: cacheData,
+                chunks: [],
+                cachedByteCount: 0,
                 startOffset: byteOffset,
                 totalSize: totalSize,
                 contentType: contentType
@@ -203,16 +229,17 @@ actor VideoCache {
                 buffer.append(byte)
 
                 if buffer.count >= Self.chunkSize {
-                    entry?.data.append(buffer)
+                    entry?.chunks.append(buffer)
+                    entry?.cachedByteCount += buffer.count
                     buffer.removeAll(keepingCapacity: true)
 
-                    // Sliding window: trim data well behind playback position
-                    if let entry, entry.data.count > Self.trimThreshold {
+                    // Sliding window: trim chunks well behind playback position
+                    if let entry, entry.cachedByteCount > Self.trimThreshold {
                         trimFront(videoId: videoId)
                     }
 
                     // Pause download if cache is too far ahead and trim can't help
-                    while let entry, entry.data.count > Self.pauseThreshold, !Task.isCancelled {
+                    while let entry, entry.cachedByteCount > Self.pauseThreshold, !Task.isCancelled {
                         try? await Task.sleep(for: .seconds(2))
                         trimFront(videoId: videoId)
                     }
@@ -220,10 +247,11 @@ actor VideoCache {
             }
 
             if !buffer.isEmpty {
-                entry?.data.append(buffer)
+                entry?.chunks.append(buffer)
+                entry?.cachedByteCount += buffer.count
             }
 
-            let cached = entry?.data.count ?? 0
+            let cached = entry?.cachedByteCount ?? 0
             logger.info("Preload complete for \(videoId): \(cached / 1_000_000)MB cached from offset \(byteOffset)")
         } catch is CancellationError {
             logger.info("Preload cancelled for \(videoId)")
