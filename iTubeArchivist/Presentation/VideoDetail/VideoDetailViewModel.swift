@@ -30,6 +30,7 @@ final class VideoDetailViewModel {
     private var stallObservation: NSKeyValueObservation?
     private var progressQueue = DispatchQueue(label: "progress", qos: .utility)
     private var authProxy: AuthProxy?
+    private var cachingResourceLoader: CachingResourceLoader?
     private var lastVLCPosition: Double = 0
 
     init(videoId: String, videoRepository: VideoRepositoryProtocol, authState: AuthState, router: AppRouter) {
@@ -64,14 +65,22 @@ final class VideoDetailViewModel {
               let url = URL(string: video.mediaUrl),
               let token = authState.token else { return }
 
-        let asset = AVURLAsset(
-            url: url,
-            options: ["AVURLAssetHTTPHeaderFieldsKey": ["Authorization": "Token \(token)"]]
-        )
+        let asset: AVURLAsset
+        if let cachingURL = CachingResourceLoader.cachingURL(from: url) {
+            let loader = CachingResourceLoader(videoId: video.youtubeId, originalURL: url, token: token)
+            let avAsset = AVURLAsset(url: cachingURL)
+            avAsset.resourceLoader.setDelegate(loader, queue: loader.loaderQueue)
+            self.cachingResourceLoader = loader
+            asset = avAsset
+        } else {
+            asset = AVURLAsset(
+                url: url,
+                options: ["AVURLAssetHTTPHeaderFieldsKey": ["Authorization": "Token \(token)"]]
+            )
+        }
+
         let playerItem = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: [.tracks, .duration])
-        playerItem.preferredForwardBufferDuration = 60
         let avPlayer = AVPlayer(playerItem: playerItem)
-        avPlayer.automaticallyWaitsToMinimizeStalling = true
 
         if startPosition > 0 {
             let time = CMTime(seconds: startPosition, preferredTimescale: 600)
@@ -80,11 +89,14 @@ final class VideoDetailViewModel {
 
         observePlayerStatus(avPlayer)
 
+        let cachedVideoId = video.youtubeId
+        let duration = video.duration
         let interval = CMTime(seconds: 10, preferredTimescale: 600)
         timeObserver = avPlayer.addPeriodicTimeObserver(forInterval: interval, queue: progressQueue) { [weak self] time in
             guard let self else { return }
             let seconds = time.seconds
             if seconds.isFinite && seconds > 0 {
+                Self.logCacheHealth(videoId: cachedVideoId, playbackPosition: seconds, duration: Double(duration))
                 Task { await self.saveProgress(position: seconds) }
             }
         }
@@ -94,6 +106,9 @@ final class VideoDetailViewModel {
     }
 
     private func observePlayerStatus(_ avPlayer: AVPlayer) {
+        let cachedVideoId = video?.youtubeId ?? videoId
+        let duration = Double(video?.duration ?? 0)
+
         statusObservation = avPlayer.observe(\.timeControlStatus, options: [.new, .old]) { player, _ in
             let status = player.timeControlStatus
             let reason = player.reasonForWaitingToPlay?.rawValue ?? "none"
@@ -101,8 +116,8 @@ final class VideoDetailViewModel {
             let bufferEmpty = player.currentItem?.isPlaybackBufferEmpty ?? false
             let keepUp = player.currentItem?.isPlaybackLikelyToKeepUp ?? false
             logger.info("timeControlStatus=\(status.rawValue) reason=\(reason) pos=\(pos)s bufferEmpty=\(bufferEmpty) keepUp=\(keepUp)")
-            if status == .paused, let item = player.currentItem, !item.isPlaybackLikelyToKeepUp {
-                logger.warning("Stall detected at \(pos)s, buffer empty=\(bufferEmpty)")
+            if status != .playing {
+                Self.logCacheHealth(videoId: cachedVideoId, playbackPosition: Double(pos), duration: duration)
             }
         }
         stallObservation = avPlayer.currentItem?.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { item, _ in
@@ -111,7 +126,40 @@ final class VideoDetailViewModel {
             let pos = Int(CMTimeGetSeconds(item.currentTime()))
             if !keepUp {
                 logger.warning("Buffer underrun at \(pos)s, bufferEmpty=\(bufferEmpty)")
+                Self.logCacheHealth(videoId: cachedVideoId, playbackPosition: Double(pos), duration: duration)
             }
+        }
+    }
+
+    private static func logCacheHealth(videoId: String, playbackPosition: Double, duration: Double) {
+        Task {
+            let range = await VideoCache.shared.cachedRange(videoId: videoId)
+            let meta = await VideoCache.shared.metadata(videoId: videoId)
+            let totalSize = meta?.totalSize ?? 0
+
+            guard let range, totalSize > 0 && duration > 0 else {
+                logger.info("[Cache] \(videoId): no cache data, no size/duration info")
+                return
+            }
+
+            let avgByterate = Double(totalSize) / duration
+            let playbackByteOffset = playbackPosition * avgByterate
+            let cachedEndByte = Double(range.endOffset)
+            let bytesAhead = cachedEndByte - playbackByteOffset
+            let secondsAhead = bytesAhead / avgByterate
+            let cachedBytes = range.endOffset - range.startOffset
+            let cachePercent = Int(Double(cachedBytes) / Double(totalSize) * 100)
+
+            let level: String
+            if secondsAhead < 15 {
+                level = "CRITICAL"
+            } else if secondsAhead < 30 {
+                level = "LOW"
+            } else {
+                level = "OK"
+            }
+
+            logger.info("[Cache] \(level) pos=\(Int(playbackPosition))s ahead=\(String(format: "%.0f", secondsAhead))s cached=\(cachePercent)% range=\(range.startOffset)-\(range.endOffset)/\(totalSize)")
         }
     }
 
@@ -165,6 +213,9 @@ final class VideoDetailViewModel {
             }
             player.pause()
             self.player = nil
+            cachingResourceLoader = nil
+            let vid = videoId
+            Task { await VideoCache.shared.cancelPreload(videoId: vid) }
         }
 
         // Stop VLC
@@ -196,6 +247,20 @@ final class VideoDetailViewModel {
             }
         } catch {
             errorMessage = String(localized: "error_generic")
+        }
+
+        // Start preloading for AVPlayer videos
+        if let video,
+           CodecSupport.requiredPlayer(for: video.streams) == .avPlayer,
+           let url = URL(string: video.mediaUrl),
+           let token = authState.token {
+            await VideoCache.shared.startPreload(
+                videoId: video.youtubeId,
+                url: url,
+                token: token,
+                startPosition: video.position,
+                duration: Double(video.duration)
+            )
         }
 
         isLoading = false
