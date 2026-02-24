@@ -5,7 +5,8 @@ import OSLog
 private let logger = Logger(subsystem: "ru.mzhukov.iTubeArchivist", category: "CachingResourceLoader")
 
 private let cachingScheme = "itacache"
-private let maxResponseSize = 2 * 1024 * 1024 // 2 MB max per response (cache or network)
+private let maxCacheResponseSize = 16 * 1024 * 1024  // 16 MB max per cache read
+private let maxNetworkResponseSize = 16 * 1024 * 1024 // 16 MB max per network fetch (data(for:) buffers entire response)
 
 final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     let videoId: String
@@ -116,23 +117,21 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
 
     private func fillDataRequest(_ dataRequest: AVAssetResourceLoadingDataRequest) async -> Bool {
         let offset = dataRequest.currentOffset
-        let fetchLength = min(dataRequest.requestedLength, maxResponseSize)
 
-        // Notify cache to trim data behind playback position
-        await VideoCache.shared.trimBefore(videoId: videoId, offset: offset)
-
-        // Try reading from cache (capped to maxResponseSize)
+        // Try reading from cache (larger chunks — RAM is fast)
+        let cacheLength = min(dataRequest.requestedLength, maxCacheResponseSize)
         if let cachedData = await VideoCache.shared.readData(
             videoId: videoId,
             offset: offset,
-            length: fetchLength
+            length: cacheLength
         ) {
             dataRequest.respond(with: cachedData)
             return true
         }
 
-        // Fallback: fetch from network (same cap)
-        return await fetchFromNetwork(dataRequest: dataRequest, offset: offset, length: fetchLength)
+        // Fallback: fetch from network (capped — data(for:) buffers entire response in memory)
+        let networkLength = min(dataRequest.requestedLength, maxNetworkResponseSize)
+        return await fetchFromNetwork(dataRequest: dataRequest, offset: offset, length: networkLength)
     }
 
     private func fetchFromNetwork(

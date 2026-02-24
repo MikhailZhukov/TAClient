@@ -7,6 +7,8 @@ actor VideoCache {
     static let shared = VideoCache()
 
     private static let maxCacheSize = 256_000_000    // 256 MB sliding window
+    private static let trimThreshold = 282_000_000   // trim when cache exceeds this (~10% over max)
+    private static let trimTarget = 204_000_000      // trim down to this (~80% of max, ~50 MB freed)
     private static let chunkSize = 512 * 1024        // 512 KB
 
     struct CacheEntry {
@@ -34,6 +36,23 @@ actor VideoCache {
     // MARK: - Preloading
 
     func startPreload(videoId: String, url: URL, token: String, startPosition: Double = 0, duration: Double = 0) {
+        // Skip if cache already covers the requested start position
+        if let entry = entries[videoId], entry.data.count > 0, duration > 0 {
+            let avgByterate = Double(entry.totalSize) / duration
+            let requestedByte = Int64(startPosition * avgByterate)
+            let cacheEnd = entry.startOffset + Int64(entry.data.count)
+            if requestedByte >= entry.startOffset && requestedByte < cacheEnd {
+                // Also skip if preload is still running
+                if isPreloading(videoId: videoId) {
+                    logger.info("Preload for \(videoId) already active with data covering position \(Int(startPosition))s, skipping")
+                    return
+                }
+                // Cache has data but preload finished — still good, no need to restart
+                logger.info("Cache for \(videoId) already covers position \(Int(startPosition))s, skipping preload")
+                return
+            }
+        }
+
         preloadTasks[videoId]?.cancel()
 
         let task = Task { [weak self] in
@@ -170,12 +189,12 @@ actor VideoCache {
                     entries[videoId]?.data.append(buffer)
                     buffer.removeAll(keepingCapacity: true)
 
-                    // Sliding window: if cache exceeds limit, trim will handle it
-                    // (trimBefore is called by the resource loader as playback advances)
-                    let cached = entries[videoId]?.data.count ?? 0
-                    if cached > Self.maxCacheSize {
-                        // If trim hasn't been called yet, pause briefly to let playback catch up
-                        try? await Task.sleep(for: .seconds(1))
+                    // Sliding window: trim front in bulk when well over limit
+                    if let cached = entries[videoId]?.data.count, cached > Self.trimThreshold {
+                        let excess = cached - Self.trimTarget
+                        entries[videoId]?.data.removeSubrange(0..<excess)
+                        entries[videoId]?.startOffset += Int64(excess)
+                        logger.info("Trimmed \(excess / 1_000_000)MB from front of \(videoId)")
                     }
                     evictIfNeeded(excluding: videoId)
                 }
