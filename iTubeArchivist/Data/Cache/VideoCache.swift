@@ -12,22 +12,22 @@ actor VideoCache {
     private static let chunkSize = 512 * 1024        // 512 KB
 
     struct CacheEntry {
+        let videoId: String
         var data: Data
         var startOffset: Int64            // byte offset where data begins in the file
         var totalSize: Int64
         var contentType: String
-        var lastAccess: Date
     }
 
-    private var entries: [String: CacheEntry] = [:]
-    private var preloadTasks: [String: Task<Void, Never>] = [:]
+    private var entry: CacheEntry?
+    private var preloadTask: Task<Void, Never>?
     private var memoryPressureSource: (any DispatchSourceMemoryPressure)?
 
     private init() {
         let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .global())
         source.setEventHandler { [weak self] in
             guard let self else { return }
-            Task { await self.handleMemoryPressure() }
+            Task { await self.clear() }
         }
         source.resume()
         memoryPressureSource = source
@@ -37,80 +37,72 @@ actor VideoCache {
 
     func startPreload(videoId: String, url: URL, token: String, startPosition: Double = 0, duration: Double = 0) {
         // Skip if cache already covers the requested start position
-        if let entry = entries[videoId], entry.data.count > 0, duration > 0 {
+        if let entry, entry.videoId == videoId, entry.data.count > 0, duration > 0 {
             let avgByterate = Double(entry.totalSize) / duration
             let requestedByte = Int64(startPosition * avgByterate)
             let cacheEnd = entry.startOffset + Int64(entry.data.count)
             if requestedByte >= entry.startOffset && requestedByte < cacheEnd {
-                // Also skip if preload is still running
                 if isPreloading(videoId: videoId) {
-                    logger.info("Preload for \(videoId) already active with data covering position \(Int(startPosition))s, skipping")
+                    logger.info("Preload for \(videoId) already active, skipping")
                     return
                 }
-                // Cache has data but preload finished — still good, no need to restart
                 logger.info("Cache for \(videoId) already covers position \(Int(startPosition))s, skipping preload")
                 return
             }
         }
 
-        preloadTasks[videoId]?.cancel()
+        // Clear previous video's cache and preload
+        preloadTask?.cancel()
+        preloadTask = nil
+        entry = nil
 
         let task = Task { [weak self] in
             guard let self else { return }
             await self.downloadVideo(videoId: videoId, url: url, token: token, startPosition: startPosition, duration: duration)
         }
-        preloadTasks[videoId] = task
+        preloadTask = task
         logger.info("Started preloading \(videoId) from position \(Int(startPosition))s")
     }
 
     func cancelPreload(videoId: String) {
-        preloadTasks[videoId]?.cancel()
-        preloadTasks.removeValue(forKey: videoId)
+        guard entry?.videoId == videoId else { return }
+        preloadTask?.cancel()
+        preloadTask = nil
         logger.info("Cancelled preload for \(videoId)")
     }
 
     // MARK: - Data Access
 
     func readData(videoId: String, offset: Int64, length: Int) -> Data? {
-        guard var entry = entries[videoId] else { return nil }
+        guard let entry, entry.videoId == videoId else { return nil }
 
         let relativeOffset = Int(offset - entry.startOffset)
-        guard relativeOffset >= 0 else { return nil }
+        guard relativeOffset >= 0, relativeOffset < entry.data.count else { return nil }
 
         let end = min(relativeOffset + length, entry.data.count)
-        guard relativeOffset < entry.data.count else { return nil }
-
-        entry.lastAccess = Date()
-        entries[videoId] = entry
         return entry.data[relativeOffset..<end]
     }
 
-    /// Trim already-played data from the front of the cache to free memory.
-    func trimBefore(videoId: String, offset: Int64) {
-        guard var entry = entries[videoId] else { return }
-
-        // Keep a small margin (4MB) before the offset to handle backward seeks for keyframes
-        let trimTo = max(0, Int(offset - entry.startOffset) - 4_000_000)
-        guard trimTo > 1_000_000 else { return } // only trim if > 1MB to reclaim
-
-        entry.data.removeSubrange(0..<trimTo)
-        entry.startOffset += Int64(trimTo)
-        entries[videoId] = entry
-    }
-
     func cachedRange(videoId: String) -> (startOffset: Int64, endOffset: Int64)? {
-        guard let entry = entries[videoId] else { return nil }
+        guard let entry, entry.videoId == videoId else { return nil }
         return (entry.startOffset, entry.startOffset + Int64(entry.data.count))
     }
 
     func metadata(videoId: String) -> (totalSize: Int64, contentType: String)? {
-        guard let entry = entries[videoId] else { return nil }
+        guard let entry, entry.videoId == videoId else { return nil }
         return (entry.totalSize, entry.contentType)
     }
 
     func isPreloading(videoId: String) -> Bool {
-        guard let task = preloadTasks[videoId] else { return false }
-        return !task.isCancelled
+        guard let entry, entry.videoId == videoId, let preloadTask else { return false }
+        return !preloadTask.isCancelled
+    }
+
+    func clear() {
+        preloadTask?.cancel()
+        preloadTask = nil
+        entry = nil
+        logger.info("Cache cleared")
     }
 
     // MARK: - Download
@@ -169,12 +161,12 @@ actor VideoCache {
 
             let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "video/mp4"
 
-            entries[videoId] = CacheEntry(
+            entry = CacheEntry(
+                videoId: videoId,
                 data: Data(),
                 startOffset: byteOffset,
                 totalSize: totalSize,
-                contentType: contentType,
-                lastAccess: Date()
+                contentType: contentType
             )
 
             var buffer = Data()
@@ -186,25 +178,24 @@ actor VideoCache {
                 buffer.append(byte)
 
                 if buffer.count >= Self.chunkSize {
-                    entries[videoId]?.data.append(buffer)
+                    entry?.data.append(buffer)
                     buffer.removeAll(keepingCapacity: true)
 
                     // Sliding window: trim front in bulk when well over limit
-                    if let cached = entries[videoId]?.data.count, cached > Self.trimThreshold {
+                    if let cached = entry?.data.count, cached > Self.trimThreshold {
                         let excess = cached - Self.trimTarget
-                        entries[videoId]?.data.removeSubrange(0..<excess)
-                        entries[videoId]?.startOffset += Int64(excess)
+                        entry?.data.removeSubrange(0..<excess)
+                        entry?.startOffset += Int64(excess)
                         logger.info("Trimmed \(excess / 1_000_000)MB from front of \(videoId)")
                     }
-                    evictIfNeeded(excluding: videoId)
                 }
             }
 
             if !buffer.isEmpty {
-                entries[videoId]?.data.append(buffer)
+                entry?.data.append(buffer)
             }
 
-            let cached = entries[videoId]?.data.count ?? 0
+            let cached = entry?.data.count ?? 0
             logger.info("Preload complete for \(videoId): \(cached / 1_000_000)MB cached from offset \(byteOffset)")
         } catch is CancellationError {
             logger.info("Preload cancelled for \(videoId)")
@@ -212,37 +203,6 @@ actor VideoCache {
             logger.error("Preload error for \(videoId): \(error.localizedDescription)")
         }
 
-        preloadTasks.removeValue(forKey: videoId)
-    }
-
-    // MARK: - Eviction
-
-    private func evictIfNeeded(excluding activeVideoId: String) {
-        let totalSize = entries.values.reduce(0) { $0 + $1.data.count }
-        guard totalSize > Self.maxCacheSize else { return }
-
-        let sorted = entries
-            .filter { $0.key != activeVideoId }
-            .sorted { $0.value.lastAccess < $1.value.lastAccess }
-
-        var currentSize = totalSize
-        for (key, _) in sorted {
-            guard currentSize > Self.maxCacheSize else { break }
-            currentSize -= entries[key]?.data.count ?? 0
-            entries.removeValue(forKey: key)
-            logger.info("Evicted cache for \(key)")
-        }
-    }
-
-    private func handleMemoryPressure() {
-        for (id, task) in preloadTasks {
-            task.cancel()
-            preloadTasks.removeValue(forKey: id)
-        }
-        let count = entries.count
-        entries.removeAll()
-        if count > 0 {
-            logger.warning("Memory pressure: evicted all \(count) cache entries and cancelled preloads")
-        }
+        preloadTask = nil
     }
 }
