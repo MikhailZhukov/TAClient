@@ -293,6 +293,8 @@ final class VideoDetailViewModel {
     func deleteVideo() async {
         do {
             try await videoRepository.deleteVideo(id: videoId)
+            stopPlayback()
+            await VideoCache.shared.clear()
             router.goBack()
         } catch let error as AppError {
             if case .unauthorized = error {
@@ -305,6 +307,8 @@ final class VideoDetailViewModel {
         do {
             try await videoRepository.deleteVideo(id: videoId)
             try await videoRepository.ignoreVideo(id: videoId)
+            stopPlayback()
+            await VideoCache.shared.clear()
             router.goBack()
         } catch let error as AppError {
             if case .unauthorized = error {
