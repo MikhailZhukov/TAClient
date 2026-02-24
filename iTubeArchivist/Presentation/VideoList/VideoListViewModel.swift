@@ -25,8 +25,10 @@ final class VideoListViewModel {
         self.router = router
     }
 
-    func loadVideos() async {
-        isLoading = true
+    func loadVideos(isRefresh: Bool = false) async {
+        if !isRefresh {
+            isLoading = true
+        }
         errorMessage = nil
         currentPage = 1
 
@@ -80,7 +82,7 @@ final class VideoListViewModel {
     }
 
     func refresh() async {
-        await loadVideos()
+        await loadVideos(isRefresh: true)
     }
 
     func onSortOrFilterChanged() async {

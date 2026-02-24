@@ -2,9 +2,8 @@ import Foundation
 import Network
 import OSLog
 
-private let logger = Logger(subsystem: "ru.mzhukov.iTubeArchivist", category: "AuthProxy")
-
 actor AuthProxy {
+    private static let logger = Logger(subsystem: "ru.mzhukov.iTubeArchivist", category: "AuthProxy")
     private var listener: NWListener?
     private var port: UInt16 = 0
     private let token: String
@@ -62,10 +61,10 @@ actor AuthProxy {
         listener.stateUpdateHandler = { [weak self] state in
             switch state {
             case .failed(let error):
-                logger.error("Listener failed: \(error.localizedDescription)")
+                Self.logger.error("Listener failed: \(error.localizedDescription)")
                 Task { await self?.restartListener() }
             case .cancelled:
-                logger.info("Listener cancelled")
+                Self.logger.info("Listener cancelled")
             default:
                 break
             }
@@ -77,7 +76,7 @@ actor AuthProxy {
 
     private func restartListener() {
         guard listener != nil else { return }
-        logger.warning("Attempting restart...")
+        Self.logger.warning("Attempting restart...")
         listener?.cancel()
         listener = nil
         Task {
@@ -228,7 +227,7 @@ actor AuthProxy {
                 connection.cancel()
             })
         } catch {
-            logger.error("Stream error: \(error.localizedDescription)")
+            Self.logger.error("Stream error: \(error.localizedDescription)")
             Self.sendError(connection, code: 502)
         }
     }

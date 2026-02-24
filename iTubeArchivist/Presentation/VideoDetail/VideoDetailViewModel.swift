@@ -26,6 +26,8 @@ final class VideoDetailViewModel {
     private let authState: AuthState
     private let router: AppRouter
     private var timeObserver: Any?
+    private var statusObservation: NSKeyValueObservation?
+    private var stallObservation: NSKeyValueObservation?
     private var progressQueue = DispatchQueue(label: "progress", qos: .utility)
     private var authProxy: AuthProxy?
     private var lastVLCPosition: Double = 0
@@ -67,12 +69,16 @@ final class VideoDetailViewModel {
             options: ["AVURLAssetHTTPHeaderFieldsKey": ["Authorization": "Token \(token)"]]
         )
         let playerItem = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: [.tracks, .duration])
+        playerItem.preferredForwardBufferDuration = 60
         let avPlayer = AVPlayer(playerItem: playerItem)
+        avPlayer.automaticallyWaitsToMinimizeStalling = true
 
         if startPosition > 0 {
             let time = CMTime(seconds: startPosition, preferredTimescale: 600)
             avPlayer.seek(to: time)
         }
+
+        observePlayerStatus(avPlayer)
 
         let interval = CMTime(seconds: 10, preferredTimescale: 600)
         timeObserver = avPlayer.addPeriodicTimeObserver(forInterval: interval, queue: progressQueue) { [weak self] time in
@@ -85,6 +91,28 @@ final class VideoDetailViewModel {
 
         self.player = avPlayer
         avPlayer.play()
+    }
+
+    private func observePlayerStatus(_ avPlayer: AVPlayer) {
+        statusObservation = avPlayer.observe(\.timeControlStatus, options: [.new, .old]) { player, _ in
+            let status = player.timeControlStatus
+            let reason = player.reasonForWaitingToPlay?.rawValue ?? "none"
+            let pos = Int(player.currentTime().seconds)
+            let bufferEmpty = player.currentItem?.isPlaybackBufferEmpty ?? false
+            let keepUp = player.currentItem?.isPlaybackLikelyToKeepUp ?? false
+            logger.info("timeControlStatus=\(status.rawValue) reason=\(reason) pos=\(pos)s bufferEmpty=\(bufferEmpty) keepUp=\(keepUp)")
+            if status == .paused, let item = player.currentItem, !item.isPlaybackLikelyToKeepUp {
+                logger.warning("Stall detected at \(pos)s, buffer empty=\(bufferEmpty)")
+            }
+        }
+        stallObservation = avPlayer.currentItem?.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { item, _ in
+            let keepUp = item.isPlaybackLikelyToKeepUp
+            let bufferEmpty = item.isPlaybackBufferEmpty
+            let pos = Int(CMTimeGetSeconds(item.currentTime()))
+            if !keepUp {
+                logger.warning("Buffer underrun at \(pos)s, bufferEmpty=\(bufferEmpty)")
+            }
+        }
     }
 
     // MARK: - VLC Player
@@ -123,6 +151,10 @@ final class VideoDetailViewModel {
     func stopPlayback() {
         // Stop AVPlayer
         if let player {
+            statusObservation?.invalidate()
+            statusObservation = nil
+            stallObservation?.invalidate()
+            stallObservation = nil
             if let observer = timeObserver {
                 player.removeTimeObserver(observer)
                 timeObserver = nil
