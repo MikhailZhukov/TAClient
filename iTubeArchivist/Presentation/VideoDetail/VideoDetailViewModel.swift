@@ -83,7 +83,6 @@ final class VideoDetailViewModel {
         let playerItem = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: [.tracks, .duration])
         playerItem.preferredForwardBufferDuration = 3  // start with less buffer — cache fills fast
         let avPlayer = AVPlayer(playerItem: playerItem)
-        avPlayer.automaticallyWaitsToMinimizeStalling = false  // start playback immediately
 
         if startPosition > 0 {
             let time = CMTime(seconds: startPosition, preferredTimescale: 600)
