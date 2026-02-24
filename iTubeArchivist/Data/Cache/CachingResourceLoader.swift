@@ -2,7 +2,7 @@ import Foundation
 import AVFoundation
 import OSLog
 
-private let logger = Logger(subsystem: "ru.mzhukov.iTubeArchivist", category: "CachingResourceLoader")
+private nonisolated let logger = Logger(subsystem: "ru.mzhukov.iTubeArchivist", category: "CachingResourceLoader")
 
 private let cachingScheme = "itacache"
 private let maxCacheResponseSize = 16 * 1024 * 1024  // 16 MB max per cache read

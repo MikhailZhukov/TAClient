@@ -1,7 +1,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: "ru.mzhukov.iTubeArchivist", category: "VideoCache")
+private nonisolated let logger = Logger(subsystem: "ru.mzhukov.iTubeArchivist", category: "VideoCache")
 
 actor VideoCache {
     static let shared = VideoCache()
