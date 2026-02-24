@@ -32,6 +32,7 @@ final class VideoDetailViewModel {
     private var authProxy: AuthProxy?
     private var cachingResourceLoader: CachingResourceLoader?
     private var lastVLCPosition: Double = 0
+    private var lastCacheLogTime: CFAbsoluteTime = 0
 
     init(videoId: String, videoRepository: VideoRepositoryProtocol, authState: AuthState, router: AppRouter) {
         self.videoId = videoId
@@ -96,7 +97,7 @@ final class VideoDetailViewModel {
             guard let self else { return }
             let seconds = time.seconds
             if seconds.isFinite && seconds > 0 {
-                Self.logCacheHealth(videoId: cachedVideoId, playbackPosition: seconds, duration: Double(duration))
+                self.logCacheHealth(videoId: cachedVideoId, playbackPosition: seconds, duration: Double(duration))
                 Task { await self.saveProgress(position: seconds) }
             }
         }
@@ -109,7 +110,7 @@ final class VideoDetailViewModel {
         let cachedVideoId = video?.youtubeId ?? videoId
         let duration = Double(video?.duration ?? 0)
 
-        statusObservation = avPlayer.observe(\.timeControlStatus, options: [.new, .old]) { player, _ in
+        statusObservation = avPlayer.observe(\.timeControlStatus, options: [.new, .old]) { [weak self] player, _ in
             let status = player.timeControlStatus
             let reason = player.reasonForWaitingToPlay?.rawValue ?? "none"
             let pos = Int(player.currentTime().seconds)
@@ -117,49 +118,53 @@ final class VideoDetailViewModel {
             let keepUp = player.currentItem?.isPlaybackLikelyToKeepUp ?? false
             logger.info("timeControlStatus=\(status.rawValue) reason=\(reason) pos=\(pos)s bufferEmpty=\(bufferEmpty) keepUp=\(keepUp)")
             if status != .playing {
-                Self.logCacheHealth(videoId: cachedVideoId, playbackPosition: Double(pos), duration: duration)
+                self?.logCacheHealth(videoId: cachedVideoId, playbackPosition: Double(pos), duration: duration)
             }
         }
-        stallObservation = avPlayer.currentItem?.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { item, _ in
+        stallObservation = avPlayer.currentItem?.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { [weak self] item, _ in
             let keepUp = item.isPlaybackLikelyToKeepUp
             let bufferEmpty = item.isPlaybackBufferEmpty
             let pos = Int(CMTimeGetSeconds(item.currentTime()))
             if !keepUp {
                 logger.warning("Buffer underrun at \(pos)s, bufferEmpty=\(bufferEmpty)")
-                Self.logCacheHealth(videoId: cachedVideoId, playbackPosition: Double(pos), duration: duration)
+                self?.logCacheHealth(videoId: cachedVideoId, playbackPosition: Double(pos), duration: duration)
             }
         }
     }
 
-    private static func logCacheHealth(videoId: String, playbackPosition: Double, duration: Double) {
-        Task {
-            let range = await VideoCache.shared.cachedRange(videoId: videoId)
-            let meta = await VideoCache.shared.metadata(videoId: videoId)
-            let totalSize = meta?.totalSize ?? 0
+    private func logCacheHealth(videoId: String, playbackPosition: Double, duration: Double) {
+        // Throttle: max once per 3 seconds
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastCacheLogTime >= 3 else { return }
+        lastCacheLogTime = now
 
-            guard let range, totalSize > 0 && duration > 0 else {
-                logger.info("[Cache] \(videoId): no cache data, no size/duration info")
-                return
+        Task {
+            guard let status = await VideoCache.shared.cacheStatus(videoId: videoId),
+                  status.totalSize > 0 && duration > 0 else { return }
+
+            let avgByterate = Double(status.totalSize) / duration
+            let playbackByteOffset = playbackPosition * avgByterate
+            let cachedBytes = status.endOffset - status.startOffset
+            let cachePercent = Int(Double(cachedBytes) / Double(status.totalSize) * 100)
+
+            // Account for gap: if playback is before cache start, ahead is negative
+            let effectiveAhead: Double
+            if playbackByteOffset < Double(status.startOffset) {
+                effectiveAhead = -(Double(status.startOffset) - playbackByteOffset) / avgByterate
+            } else {
+                effectiveAhead = (Double(status.endOffset) - playbackByteOffset) / avgByterate
             }
 
-            let avgByterate = Double(totalSize) / duration
-            let playbackByteOffset = playbackPosition * avgByterate
-            let cachedEndByte = Double(range.endOffset)
-            let bytesAhead = cachedEndByte - playbackByteOffset
-            let secondsAhead = bytesAhead / avgByterate
-            let cachedBytes = range.endOffset - range.startOffset
-            let cachePercent = Int(Double(cachedBytes) / Double(totalSize) * 100)
-
             let level: String
-            if secondsAhead < 15 {
+            if effectiveAhead < 15 {
                 level = "CRITICAL"
-            } else if secondsAhead < 30 {
+            } else if effectiveAhead < 30 {
                 level = "LOW"
             } else {
                 level = "OK"
             }
 
-            logger.info("[Cache] \(level) pos=\(Int(playbackPosition))s ahead=\(String(format: "%.0f", secondsAhead))s cached=\(cachePercent)% range=\(range.startOffset)-\(range.endOffset)/\(totalSize)")
+            logger.info("[Cache] \(level) pos=\(Int(playbackPosition))s ahead=\(String(format: "%.0f", effectiveAhead))s cached=\(cachePercent)% range=\(status.startOffset)-\(status.endOffset)/\(status.totalSize)")
         }
     }
 

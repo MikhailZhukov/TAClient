@@ -94,14 +94,9 @@ actor VideoCache {
         return Data(entry.data[relativeOffset..<end])
     }
 
-    func cachedRange(videoId: String) -> (startOffset: Int64, endOffset: Int64)? {
+    func cacheStatus(videoId: String) -> (startOffset: Int64, endOffset: Int64, totalSize: Int64, contentType: String)? {
         guard let entry, entry.videoId == videoId else { return nil }
-        return (entry.startOffset, entry.startOffset + Int64(entry.data.count))
-    }
-
-    func metadata(videoId: String) -> (totalSize: Int64, contentType: String)? {
-        guard let entry, entry.videoId == videoId else { return nil }
-        return (entry.totalSize, entry.contentType)
+        return (entry.startOffset, entry.startOffset + Int64(entry.data.count), entry.totalSize, entry.contentType)
     }
 
     func isPreloading(videoId: String) -> Bool {

@@ -89,9 +89,9 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     }
 
     private func fillContentInfo(_ contentRequest: AVAssetResourceLoadingContentInformationRequest) async -> Bool {
-        if let meta = await VideoCache.shared.metadata(videoId: videoId) {
-            contentRequest.contentLength = meta.totalSize
-            contentRequest.contentType = contentTypeUTI(from: meta.contentType)
+        if let status = await VideoCache.shared.cacheStatus(videoId: videoId) {
+            contentRequest.contentLength = status.totalSize
+            contentRequest.contentType = contentTypeUTI(from: status.contentType)
             contentRequest.isByteRangeAccessSupported = true
             return true
         }
