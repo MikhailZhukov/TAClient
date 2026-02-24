@@ -28,12 +28,12 @@ actor VideoCache {
 
     private init() {
         let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .global())
+        memoryPressureSource = source
         source.setEventHandler { [weak self] in
             guard let self else { return }
             Task { await self.clear() }
         }
         source.resume()
-        memoryPressureSource = source
     }
 
     // MARK: - Preloading
