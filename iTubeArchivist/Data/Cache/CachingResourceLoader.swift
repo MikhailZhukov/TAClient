@@ -5,7 +5,7 @@ import OSLog
 private let logger = Logger(subsystem: "ru.mzhukov.iTubeArchivist", category: "CachingResourceLoader")
 
 private let cachingScheme = "itacache"
-private let networkChunkSize = 2 * 1024 * 1024 // 2 MB max per network fetch
+private let maxResponseSize = 2 * 1024 * 1024 // 2 MB max per response (cache or network)
 
 final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     let videoId: String
@@ -64,7 +64,6 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     private func handleLoadingRequest(_ loadingRequest: AVAssetResourceLoadingRequest) async {
         guard !loadingRequest.isCancelled else { return }
 
-        // Fill content information
         if let contentRequest = loadingRequest.contentInformationRequest {
             let ok = await fillContentInfo(contentRequest)
             if !ok {
@@ -75,7 +74,6 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
 
         guard !loadingRequest.isCancelled else { return }
 
-        // Fill data
         if let dataRequest = loadingRequest.dataRequest {
             let ok = await fillDataRequest(dataRequest)
             if !ok {
@@ -90,16 +88,13 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     }
 
     private func fillContentInfo(_ contentRequest: AVAssetResourceLoadingContentInformationRequest) async -> Bool {
-        // Try cache first
         if let meta = await VideoCache.shared.metadata(videoId: videoId) {
             contentRequest.contentLength = meta.totalSize
             contentRequest.contentType = contentTypeUTI(from: meta.contentType)
             contentRequest.isByteRangeAccessSupported = true
-            logger.debug("ContentInfo from cache: \(meta.totalSize) bytes, type=\(meta.contentType)")
             return true
         }
 
-        // Fallback: HEAD request
         var request = URLRequest(url: originalURL)
         request.httpMethod = "HEAD"
         request.setValue("Token \(token)", forHTTPHeaderField: "Authorization")
@@ -111,7 +106,6 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
                 let mimeType = http.value(forHTTPHeaderField: "Content-Type") ?? "video/mp4"
                 contentRequest.contentType = contentTypeUTI(from: mimeType)
                 contentRequest.isByteRangeAccessSupported = true
-                logger.debug("ContentInfo from HEAD: \(http.expectedContentLength) bytes, type=\(mimeType)")
                 return true
             }
         } catch {
@@ -122,21 +116,22 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
 
     private func fillDataRequest(_ dataRequest: AVAssetResourceLoadingDataRequest) async -> Bool {
         let offset = dataRequest.currentOffset
-        logger.debug("DataRequest: offset=\(offset) requested=\(dataRequest.requestedLength) toEnd=\(dataRequest.requestsAllDataToEndOfResource)")
+        let fetchLength = min(dataRequest.requestedLength, maxResponseSize)
 
-        // Try reading from cache
+        // Notify cache to trim data behind playback position
+        await VideoCache.shared.trimBefore(videoId: videoId, offset: offset)
+
+        // Try reading from cache (capped to maxResponseSize)
         if let cachedData = await VideoCache.shared.readData(
             videoId: videoId,
             offset: offset,
-            length: dataRequest.requestedLength
+            length: fetchLength
         ) {
             dataRequest.respond(with: cachedData)
-            logger.debug("Served \(cachedData.count) bytes from cache at offset \(offset)")
             return true
         }
 
-        // Fallback: fetch from network (capped chunk size)
-        let fetchLength = min(dataRequest.requestedLength, networkChunkSize)
+        // Fallback: fetch from network (same cap)
         return await fetchFromNetwork(dataRequest: dataRequest, offset: offset, length: fetchLength)
     }
 
@@ -158,7 +153,6 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
                 return false
             }
             dataRequest.respond(with: data)
-            logger.debug("Served \(data.count) bytes from network at offset \(offset)")
             return true
         } catch {
             logger.error("Network fetch error at offset \(offset): \(error.localizedDescription)")

@@ -6,8 +6,7 @@ private let logger = Logger(subsystem: "ru.mzhukov.iTubeArchivist", category: "V
 actor VideoCache {
     static let shared = VideoCache()
 
-    private static let maxCacheSize = 256_000_000    // 256 MB total
-    private static let maxPreloadSize = 200_000_000  // 200 MB per video
+    private static let maxCacheSize = 256_000_000    // 256 MB sliding window
     private static let chunkSize = 512 * 1024        // 512 KB
 
     struct CacheEntry {
@@ -56,7 +55,6 @@ actor VideoCache {
     func readData(videoId: String, offset: Int64, length: Int) -> Data? {
         guard var entry = entries[videoId] else { return nil }
 
-        // Convert absolute file offset to index within our cached data
         let relativeOffset = Int(offset - entry.startOffset)
         guard relativeOffset >= 0 else { return nil }
 
@@ -66,6 +64,19 @@ actor VideoCache {
         entry.lastAccess = Date()
         entries[videoId] = entry
         return entry.data[relativeOffset..<end]
+    }
+
+    /// Trim already-played data from the front of the cache to free memory.
+    func trimBefore(videoId: String, offset: Int64) {
+        guard var entry = entries[videoId] else { return }
+
+        // Keep a small margin (4MB) before the offset to handle backward seeks for keyframes
+        let trimTo = max(0, Int(offset - entry.startOffset) - 4_000_000)
+        guard trimTo > 1_000_000 else { return } // only trim if > 1MB to reclaim
+
+        entry.data.removeSubrange(0..<trimTo)
+        entry.startOffset += Int64(trimTo)
+        entries[videoId] = entry
     }
 
     func cachedRange(videoId: String) -> (startOffset: Int64, endOffset: Int64)? {
@@ -95,7 +106,6 @@ actor VideoCache {
         var knownTotalSize: Int64 = -1
 
         if startPosition > 0 && duration > 0 {
-            // HEAD request to get total file size for offset calculation
             var headRequest = URLRequest(url: url)
             headRequest.httpMethod = "HEAD"
             headRequest.setValue("Token \(token)", forHTTPHeaderField: "Authorization")
@@ -126,7 +136,6 @@ actor VideoCache {
                 return
             }
 
-            // Determine total file size from response
             let totalSize: Int64
             if httpResponse.statusCode == 206,
                let rangeHeader = httpResponse.value(forHTTPHeaderField: "Content-Range"),
@@ -161,22 +170,23 @@ actor VideoCache {
                     entries[videoId]?.data.append(buffer)
                     buffer.removeAll(keepingCapacity: true)
 
+                    // Sliding window: if cache exceeds limit, trim will handle it
+                    // (trimBefore is called by the resource loader as playback advances)
                     let cached = entries[videoId]?.data.count ?? 0
-                    if cached >= Self.maxPreloadSize {
-                        logger.info("Preload \(videoId): reached \(cached / 1_000_000)MB cap, stopping")
-                        break
+                    if cached > Self.maxCacheSize {
+                        // If trim hasn't been called yet, pause briefly to let playback catch up
+                        try? await Task.sleep(for: .seconds(1))
                     }
                     evictIfNeeded(excluding: videoId)
                 }
             }
 
-            // Flush remaining buffer
             if !buffer.isEmpty {
                 entries[videoId]?.data.append(buffer)
             }
 
             let cached = entries[videoId]?.data.count ?? 0
-            logger.info("Preload complete for \(videoId): \(cached) bytes cached from offset \(byteOffset)")
+            logger.info("Preload complete for \(videoId): \(cached / 1_000_000)MB cached from offset \(byteOffset)")
         } catch is CancellationError {
             logger.info("Preload cancelled for \(videoId)")
         } catch {
@@ -206,7 +216,6 @@ actor VideoCache {
     }
 
     private func handleMemoryPressure() {
-        // Cancel all active downloads and clear everything
         for (id, task) in preloadTasks {
             task.cancel()
             preloadTasks.removeValue(forKey: id)
