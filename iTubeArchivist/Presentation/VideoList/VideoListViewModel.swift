@@ -10,6 +10,7 @@ final class VideoListViewModel {
     var sortOption: SortOption = .downloaded
     var sortAscending: Bool = false
     var watchFilter: WatchFilter = .unwatched
+    private(set) var refreshCount = 0
 
     private var currentPage = 1
     private var lastPage = 1
@@ -43,6 +44,7 @@ final class VideoListViewModel {
             videos = result.videos
             currentPage = result.currentPage
             lastPage = result.lastPage
+            if isRefresh { refreshCount &+= 1 }
         } catch let error as AppError {
             if case .unauthorized = error {
                 router.handleUnauthorized()

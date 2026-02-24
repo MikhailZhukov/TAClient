@@ -38,6 +38,7 @@ struct VideoListView: View {
                                 Task { await viewModel.loadMoreIfNeeded() }
                             }
                         )
+                        .id(viewModel.refreshCount)
 
                         if viewModel.isLoadingMore {
                             ProgressView()
