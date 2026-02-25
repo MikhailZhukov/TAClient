@@ -50,6 +50,8 @@ struct RootView: View {
                             SearchView(viewModel: container.makeSearchViewModel())
                         case .channelDetail(let channelId):
                             ChannelDetailView(viewModel: container.makeChannelDetailViewModel(channelId: channelId))
+                        case .downloadQueue:
+                            DownloadQueueView(viewModel: container.makeDownloadQueueViewModel())
                         }
                     }
             }

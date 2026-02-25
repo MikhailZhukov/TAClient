@@ -24,6 +24,15 @@ enum APIEndpoint {
     // Search
     case search(query: String, page: Int)
 
+    // Downloads
+    case downloadList(page: Int, filter: String)
+    case updateDownloadStatus(id: String)
+    case deleteDownload(id: String)
+    case addToDownloadQueue
+    case startDownload
+    case downloadNotifications
+    case killTask(id: String)
+
     // Channels
     case channelDetail(id: String)
 
@@ -49,6 +58,20 @@ enum APIEndpoint {
             return "/api/download/\(id)/"
         case .videoComments(let id):
             return "/api/video/\(id)/comment/"
+        case .downloadList:
+            return "/api/download/"
+        case .updateDownloadStatus(let id):
+            return "/api/download/\(id)/"
+        case .deleteDownload(let id):
+            return "/api/download/\(id)/"
+        case .addToDownloadQueue:
+            return "/api/download/"
+        case .startDownload:
+            return "/api/task/by-name/download_pending/"
+        case .downloadNotifications:
+            return "/api/notification/"
+        case .killTask(let id):
+            return "/api/task/by-id/\(id)/"
         case .search:
             return "/api/search/"
         case .channelDetail(let id):
@@ -58,9 +81,9 @@ enum APIEndpoint {
 
     var method: HTTPMethod {
         switch self {
-        case .login, .videoProgress, .ignoreVideo:
+        case .login, .videoProgress, .ignoreVideo, .updateDownloadStatus, .addToDownloadQueue, .startDownload, .killTask:
             return .post
-        case .deleteVideo, .deleteVideoProgress:
+        case .deleteVideo, .deleteVideoProgress, .deleteDownload:
             return .delete
         default:
             return .get
@@ -82,11 +105,18 @@ enum APIEndpoint {
                 items.append(URLQueryItem(name: "channel", value: channel))
             }
             return items
+        case .downloadList(let page, let filter):
+            return [
+                URLQueryItem(name: "filter", value: filter),
+                URLQueryItem(name: "page", value: "\(page)"),
+            ]
         case .search(let query, let page):
             return [
                 URLQueryItem(name: "query", value: query),
                 URLQueryItem(name: "page", value: "\(page)"),
             ]
+        case .downloadNotifications:
+            return [URLQueryItem(name: "filter", value: "download")]
         default:
             return nil
         }

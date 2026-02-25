@@ -16,6 +16,7 @@ final class DependencyContainer {
     let videoRepository: VideoRepositoryProtocol
     let searchRepository: SearchRepositoryProtocol
     let channelRepository: ChannelRepositoryProtocol
+    let downloadRepository: DownloadRepositoryProtocol
 
     // Navigation
     let router: AppRouter
@@ -29,6 +30,7 @@ final class DependencyContainer {
         videoRepository = VideoRepositoryImpl(apiClient: apiClient, authState: authState)
         searchRepository = SearchRepositoryImpl(apiClient: apiClient)
         channelRepository = ChannelRepositoryImpl(apiClient: apiClient, authState: authState)
+        downloadRepository = DownloadRepositoryImpl(apiClient: apiClient, authState: authState)
 
         router = AppRouter(authState: authState)
     }
@@ -53,5 +55,9 @@ final class DependencyContainer {
 
     func makeChannelDetailViewModel(channelId: String) -> ChannelDetailViewModel {
         ChannelDetailViewModel(channelId: channelId, channelRepository: channelRepository, videoRepository: videoRepository, router: router)
+    }
+
+    func makeDownloadQueueViewModel() -> DownloadQueueViewModel {
+        DownloadQueueViewModel(downloadRepository: downloadRepository, router: router)
     }
 }

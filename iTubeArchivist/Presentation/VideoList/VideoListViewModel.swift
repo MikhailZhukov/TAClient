@@ -107,4 +107,8 @@ final class VideoListViewModel {
     func navigateToChannel(_ channelId: String) {
         router.navigate(to: .channelDetail(channelId: channelId))
     }
+
+    func navigateToDownloadQueue() {
+        router.navigate(to: .downloadQueue)
+    }
 }

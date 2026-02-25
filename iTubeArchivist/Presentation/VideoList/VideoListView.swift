@@ -63,6 +63,12 @@ struct VideoListView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 16) {
                     Button {
+                        viewModel.navigateToDownloadQueue()
+                    } label: {
+                        Image(systemName: "arrow.down.circle")
+                    }
+
+                    Button {
                         viewModel.navigateToSearch()
                     } label: {
                         Image(systemName: "magnifyingglass")

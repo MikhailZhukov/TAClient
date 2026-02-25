@@ -5,4 +5,5 @@ enum Route: Hashable {
     case videoDetail(videoId: String)
     case search
     case channelDetail(channelId: String)
+    case downloadQueue
 }
