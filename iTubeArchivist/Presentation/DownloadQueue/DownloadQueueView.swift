@@ -7,7 +7,7 @@ struct DownloadQueueView: View {
         VStack(spacing: 0) {
             if !viewModel.downloadProgress.isEmpty {
                 VStack(spacing: 6) {
-                    ForEach(viewModel.downloadProgress, id: \.title) { info in
+                    ForEach(viewModel.downloadProgress, id: \.id) { info in
                         DownloadTaskBanner(info: info)
                     }
                 }
