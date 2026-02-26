@@ -15,6 +15,25 @@ struct DownloadQueueView: View {
                 .padding(.vertical, 8)
             }
 
+            if let error = viewModel.errorMessage, !viewModel.items.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(error)
+                        .font(.subheadline)
+                    Spacer()
+                    Button {
+                        viewModel.errorMessage = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(.fill.tertiary)
+            }
+
             if viewModel.isLoading && viewModel.items.isEmpty {
                 LoadingView()
             } else if let error = viewModel.errorMessage, viewModel.items.isEmpty {
@@ -185,6 +204,13 @@ private struct DownloadItemRow: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
+                }
+
+                if let message = item.message, !message.isEmpty {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
                 }
             }
         }

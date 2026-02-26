@@ -16,6 +16,9 @@ final class DownloadQueueViewModel {
     private var lastPage = 1
     private var canLoadMore: Bool { currentPage < lastPage && !isLoadingMore }
     private var pollingTask: Task<Void, Never>?
+    private var pendingRemovals: Set<String> = []
+    private var downloadItemQueue: Set<String> = []
+    private var isProcessingDownloadQueue = false
     private let downloadRepository: DownloadRepositoryProtocol
     private let router: AppRouter
 
@@ -49,10 +52,12 @@ final class DownloadQueueViewModel {
     }
 
     func refresh() async {
+        pendingRemovals.removeAll()
         await loadDownloads(isRefresh: true)
     }
 
     func onFilterChanged() async {
+        pendingRemovals.removeAll()
         await loadDownloads()
     }
 
@@ -76,16 +81,20 @@ final class DownloadQueueViewModel {
     }
 
     func updateStatus(videoId: String, status: String) async {
+        pendingRemovals.insert(videoId)
+        items.removeAll { $0.youtubeId == videoId }
+
         do {
             try await downloadRepository.updateStatus(videoId: videoId, status: status)
-            items.removeAll { $0.youtubeId == videoId }
         } catch let error as AppError {
+            pendingRemovals.remove(videoId)
             if case .unauthorized = error {
                 router.handleUnauthorized()
             } else {
                 errorMessage = error.errorDescription
             }
         } catch {
+            pendingRemovals.remove(videoId)
             errorMessage = String(localized: "error_generic")
         }
     }
@@ -170,6 +179,7 @@ final class DownloadQueueViewModel {
 
                     if notifications.isEmpty {
                         downloadProgress = []
+                        pendingRemovals.removeAll()
                         await loadDownloads(isRefresh: true)
                         break
                     }
@@ -177,8 +187,12 @@ final class DownloadQueueViewModel {
                     downloadProgress = notifications
 
                     if filter == "pending" {
-                        let result = try await downloadRepository.getDownloads(page: 1, filter: "pending")
-                        items = result.items
+                        let (newItems, newLastPage) = try await fetchAllLoadedPages()
+                        applyPolledItems(newItems)
+                        lastPage = newLastPage
+                        if currentPage > newLastPage {
+                            currentPage = newLastPage
+                        }
                     }
                 } catch is CancellationError {
                     break
@@ -196,33 +210,98 @@ final class DownloadQueueViewModel {
     }
 
     func downloadItem(videoId: String) async {
+        downloadItemQueue.insert(videoId)
+        guard !isProcessingDownloadQueue else { return }
+        isProcessingDownloadQueue = true
+        defer { isProcessingDownloadQueue = false }
+
+        while let id = downloadItemQueue.first {
+            downloadItemQueue.remove(id)
+            do {
+                try await downloadRepository.updateStatus(videoId: id, status: "priority")
+            } catch let error as AppError {
+                if case .unauthorized = error {
+                    router.handleUnauthorized()
+                    return
+                }
+                errorMessage = error.errorDescription
+            } catch {
+                errorMessage = String(localized: "error_generic")
+            }
+        }
+
+        if pollingTask == nil {
+            do {
+                try await downloadRepository.startDownload()
+            } catch let error as AppError {
+                if case .unauthorized = error {
+                    router.handleUnauthorized()
+                    return
+                }
+                errorMessage = error.errorDescription
+                return
+            } catch {
+                errorMessage = String(localized: "error_generic")
+                return
+            }
+        }
+        startPolling()
+    }
+
+    func deleteItem(videoId: String) async {
+        pendingRemovals.insert(videoId)
+        items.removeAll { $0.youtubeId == videoId }
+
         do {
-            try await downloadRepository.updateStatus(videoId: videoId, status: "priority")
-            try await downloadRepository.startDownload()
-            startPolling()
+            try await downloadRepository.deleteDownload(videoId: videoId)
         } catch let error as AppError {
+            pendingRemovals.remove(videoId)
             if case .unauthorized = error {
                 router.handleUnauthorized()
             } else {
                 errorMessage = error.errorDescription
             }
         } catch {
+            pendingRemovals.remove(videoId)
             errorMessage = String(localized: "error_generic")
         }
     }
 
-    func deleteItem(videoId: String) async {
-        do {
-            try await downloadRepository.deleteDownload(videoId: videoId)
-            items.removeAll { $0.youtubeId == videoId }
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            } else {
-                errorMessage = error.errorDescription
+    // MARK: - Private
+
+    private func fetchAllLoadedPages() async throws -> (items: [DownloadItem], lastPage: Int) {
+        let pagesToFetch = currentPage
+        if pagesToFetch == 1 {
+            let result = try await downloadRepository.getDownloads(page: 1, filter: "pending")
+            return (result.items, result.lastPage)
+        }
+
+        return try await withThrowingTaskGroup(
+            of: (Int, DownloadListResult).self
+        ) { group in
+            for page in 1...pagesToFetch {
+                group.addTask {
+                    let result = try await self.downloadRepository.getDownloads(page: page, filter: "pending")
+                    return (page, result)
+                }
             }
-        } catch {
-            errorMessage = String(localized: "error_generic")
+
+            var pageResults: [(Int, DownloadListResult)] = []
+            for try await result in group {
+                pageResults.append(result)
+            }
+
+            pageResults.sort { $0.0 < $1.0 }
+            let merged = pageResults.flatMap { $0.1.items }
+            let newLastPage = pageResults.last?.1.lastPage ?? 1
+            return (merged, newLastPage)
+        }
+    }
+
+    private func applyPolledItems(_ newItems: [DownloadItem]) {
+        let filtered = newItems.filter { !pendingRemovals.contains($0.youtubeId) }
+        if filtered != items {
+            items = filtered
         }
     }
 }

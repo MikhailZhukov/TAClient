@@ -10,6 +10,7 @@ struct DownloadItem: Identifiable, Hashable {
     let duration: String
     let published: String
     let status: String
+    let message: String?
     let thumbUrl: String?
     let vidType: String
     let timestamp: Int
