@@ -178,9 +178,9 @@ final class DownloadQueueViewModel {
                     let notifications = try await downloadRepository.getDownloadNotifications()
 
                     if notifications.isEmpty {
-                        downloadProgress = []
                         pendingRemovals.removeAll()
                         await loadDownloads(isRefresh: true)
+                        downloadProgress = []
                         break
                     }
 
@@ -271,7 +271,7 @@ final class DownloadQueueViewModel {
 
     private func fetchAllLoadedPages() async throws -> (items: [DownloadItem], lastPage: Int) {
         let pagesToFetch = currentPage
-        if pagesToFetch == 1 {
+        if pagesToFetch <= 1 {
             let result = try await downloadRepository.getDownloads(page: 1, filter: "pending")
             return (result.items, result.lastPage)
         }

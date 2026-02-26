@@ -40,7 +40,7 @@ struct DownloadQueueView: View {
                 ErrorView(message: error) {
                     Task { await viewModel.refresh() }
                 }
-            } else if viewModel.items.isEmpty && !viewModel.isLoading {
+            } else if viewModel.items.isEmpty && !viewModel.isLoading && viewModel.downloadProgress.isEmpty {
                 Text(String(localized: "download_queue_empty"))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
