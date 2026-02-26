@@ -5,19 +5,21 @@ final class APIClient {
     private let session: URLSession
     private let loginSession: URLSession
 
-    init(authState: AuthState) {
+    init(
+        authState: AuthState,
+        configuration: URLSessionConfiguration = .default,
+        loginConfiguration: URLSessionConfiguration = .default
+    ) {
         self.authState = authState
 
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.httpCookieStorage = nil
-        config.urlCache = nil
-        self.session = URLSession(configuration: config)
+        configuration.timeoutIntervalForRequest = 30
+        configuration.httpCookieStorage = nil
+        configuration.urlCache = nil
+        self.session = URLSession(configuration: configuration)
 
-        let loginConfig = URLSessionConfiguration.default
-        loginConfig.httpCookieStorage = HTTPCookieStorage.shared
-        loginConfig.httpCookieAcceptPolicy = .always
-        self.loginSession = URLSession(configuration: loginConfig)
+        loginConfiguration.httpCookieStorage = HTTPCookieStorage.shared
+        loginConfiguration.httpCookieAcceptPolicy = .always
+        self.loginSession = URLSession(configuration: loginConfiguration)
     }
 
     func request<T: Decodable>(

@@ -2,14 +2,15 @@ import Foundation
 
 final class SearchRepositoryImpl: SearchRepositoryProtocol {
     private let apiClient: APIClient
+    private let authState: AuthState
 
-    init(apiClient: APIClient) {
+    init(apiClient: APIClient, authState: AuthState) {
         self.apiClient = apiClient
+        self.authState = authState
     }
 
     private var serverURL: String {
-        // We need authState but only for URL resolution — get it from DependencyContainer indirectly
-        DependencyContainer.shared.authState.serverURL ?? ""
+        authState.serverURL ?? ""
     }
 
     func search(query: String, page: Int) async throws -> SearchResult {

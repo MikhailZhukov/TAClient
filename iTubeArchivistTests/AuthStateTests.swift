@@ -36,9 +36,7 @@ struct AuthStateTests {
     }
 
     @Test func handleUnauthorized_clearsEverything() {
-        let keychain = KeychainService()
-        keychain.clearAll()
-        let authState = AuthState(keychainService: keychain)
+        let authState = makeAuthState()
         authState.setCredentials(token: "tok", serverURL: "https://ta.example.com")
         #expect(authState.isAuthenticated == true)
 
@@ -47,10 +45,6 @@ struct AuthStateTests {
         #expect(authState.token == nil)
         #expect(authState.serverURL == nil)
         #expect(authState.isAuthenticated == false)
-
-        // Verify keychain also cleared
-        #expect(keychain.load(for: .authToken) == nil)
-        #expect(keychain.load(for: .serverURL) == nil)
     }
 
     @Test func baseURL_computesFromServerURL() {

@@ -28,7 +28,7 @@ final class DependencyContainer {
 
         authRepository = AuthRepositoryImpl(apiClient: apiClient, authState: authState)
         videoRepository = VideoRepositoryImpl(apiClient: apiClient, authState: authState)
-        searchRepository = SearchRepositoryImpl(apiClient: apiClient)
+        searchRepository = SearchRepositoryImpl(apiClient: apiClient, authState: authState)
         channelRepository = ChannelRepositoryImpl(apiClient: apiClient, authState: authState)
         downloadRepository = DownloadRepositoryImpl(apiClient: apiClient, authState: authState)
 
