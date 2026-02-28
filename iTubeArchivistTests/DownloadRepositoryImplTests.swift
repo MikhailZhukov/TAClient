@@ -113,9 +113,9 @@ extension DataLayerSuite {
         authState.handleUnauthorized()
     }
 
-    // MARK: - getDownloadNotifications
+    // MARK: - getNotifications
 
-    @Test func getDownloadNotifications_mapsNotifications() async throws {
+    @Test func getNotifications_mapsNotifications() async throws {
         let (repo, authState) = makeRepo()
         MockResponse.setUp(json: [
             [
@@ -130,6 +130,7 @@ extension DataLayerSuite {
             [
                 "id": "task-2",
                 "title": "Error occurred",
+                "group": "rescan:filesystem",
                 "level": "error",
                 "messages": ["Network error"],
                 "progress": 0.0,
@@ -137,16 +138,18 @@ extension DataLayerSuite {
             ]
         ] as [[String: Any]])
 
-        let notifications = try await repo.getDownloadNotifications()
+        let notifications = try await repo.getNotifications()
         #expect(notifications.count == 2)
 
         #expect(notifications[0].id == "task-1")
         #expect(notifications[0].title == "Downloading video")
+        #expect(notifications[0].group == "download:add")
         #expect(notifications[0].progress == 0.33)
         #expect(notifications[0].isError == false)
         #expect(notifications[0].canStop == true)
 
         #expect(notifications[1].id == "task-2")
+        #expect(notifications[1].group == "rescan:filesystem")
         #expect(notifications[1].isError == true)
         #expect(notifications[1].canStop == false)
         authState.handleUnauthorized()

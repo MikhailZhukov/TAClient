@@ -71,8 +71,8 @@ extension DataLayerSuite {
         #expect(APIEndpoint.startDownload.path == "/api/task/by-name/download_pending/")
     }
 
-    @Test func downloadNotifications_path() {
-        #expect(APIEndpoint.downloadNotifications.path == "/api/notification/")
+    @Test func notifications_path() {
+        #expect(APIEndpoint.notifications.path == "/api/notification/")
     }
 
     @Test func killTask_path() {
@@ -93,7 +93,7 @@ extension DataLayerSuite {
         #expect(APIEndpoint.videoComments(id: "x").method == .get)
         #expect(APIEndpoint.search(query: "q", page: 1).method == .get)
         #expect(APIEndpoint.downloadList(page: 1, filter: "all").method == .get)
-        #expect(APIEndpoint.downloadNotifications.method == .get)
+        #expect(APIEndpoint.notifications.method == .get)
         #expect(APIEndpoint.channelDetail(id: "x").method == .get)
     }
 
@@ -155,11 +155,6 @@ extension DataLayerSuite {
         #expect(items.contains(URLQueryItem(name: "page", value: "2")))
     }
 
-    @Test func downloadNotifications_queryItems() {
-        let items = APIEndpoint.downloadNotifications.queryItems!
-        #expect(items.contains(URLQueryItem(name: "filter", value: "download")))
-    }
-
     @Test func endpointsWithoutQueryItems_returnNil() {
         #expect(APIEndpoint.login.queryItems == nil)
         #expect(APIEndpoint.token.queryItems == nil)
@@ -174,6 +169,7 @@ extension DataLayerSuite {
         #expect(APIEndpoint.deleteDownload(id: "x").queryItems == nil)
         #expect(APIEndpoint.addToDownloadQueue.queryItems == nil)
         #expect(APIEndpoint.startDownload.queryItems == nil)
+        #expect(APIEndpoint.notifications.queryItems == nil)
         #expect(APIEndpoint.killTask(id: "x").queryItems == nil)
         #expect(APIEndpoint.channelDetail(id: "x").queryItems == nil)
     }

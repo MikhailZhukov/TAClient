@@ -30,7 +30,7 @@ enum APIEndpoint {
     case deleteDownload(id: String)
     case addToDownloadQueue
     case startDownload
-    case downloadNotifications
+    case notifications
     case killTask(id: String)
 
     // Channels
@@ -68,7 +68,7 @@ enum APIEndpoint {
             return "/api/download/"
         case .startDownload:
             return "/api/task/by-name/download_pending/"
-        case .downloadNotifications:
+        case .notifications:
             return "/api/notification/"
         case .killTask(let id):
             return "/api/task/by-id/\(id)/"
@@ -115,8 +115,6 @@ enum APIEndpoint {
                 URLQueryItem(name: "query", value: query),
                 URLQueryItem(name: "page", value: "\(page)"),
             ]
-        case .downloadNotifications:
-            return [URLQueryItem(name: "filter", value: "download")]
         default:
             return nil
         }

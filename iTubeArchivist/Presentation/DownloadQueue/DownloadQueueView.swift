@@ -8,7 +8,7 @@ struct DownloadQueueView: View {
             if !viewModel.downloadProgress.isEmpty {
                 VStack(spacing: 6) {
                     ForEach(viewModel.downloadProgress, id: \.id) { info in
-                        DownloadTaskBanner(info: info)
+                        TaskNotificationBanner(info: info)
                     }
                 }
                 .padding(.horizontal)
@@ -218,8 +218,8 @@ private struct DownloadItemRow: View {
     }
 }
 
-private struct DownloadTaskBanner: View {
-    let info: DownloadTaskInfo
+private struct TaskNotificationBanner: View {
+    let info: TaskNotification
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {

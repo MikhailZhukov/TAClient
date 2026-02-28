@@ -10,7 +10,7 @@ final class DownloadQueueViewModel {
     var isAdding = false
     var isStartingDownload = false
     var isLoadingMore = false
-    var downloadProgress: [DownloadTaskInfo] = []
+    var downloadProgress: [TaskNotification] = []
 
     private var currentPage = 1
     private var lastPage = 1
@@ -156,10 +156,12 @@ final class DownloadQueueViewModel {
 
     func checkNotifications() async {
         do {
-            let notifications = try await downloadRepository.getDownloadNotifications()
+            let notifications = try await downloadRepository.getNotifications()
             if !notifications.isEmpty {
                 downloadProgress = notifications
-                startPolling()
+                if notifications.contains(where: { $0.group.hasPrefix("download") }) {
+                    startPolling()
+                }
             }
         } catch {}
     }
@@ -175,16 +177,17 @@ final class DownloadQueueViewModel {
                 }
 
                 do {
-                    let notifications = try await downloadRepository.getDownloadNotifications()
-
-                    if notifications.isEmpty {
-                        pendingRemovals.removeAll()
-                        await loadDownloads(isRefresh: true)
-                        downloadProgress = []
-                        break
-                    }
+                    let notifications = try await downloadRepository.getNotifications()
+                    let hasActiveDownload = notifications.contains { $0.group.hasPrefix("download") }
 
                     downloadProgress = notifications
+
+                    if !hasActiveDownload {
+                        pendingRemovals.removeAll()
+                        await loadDownloads(isRefresh: true)
+                        downloadProgress = notifications.isEmpty ? [] : notifications
+                        break
+                    }
 
                     if filter == "pending" {
                         let (newItems, newLastPage) = try await fetchAllLoadedPages()

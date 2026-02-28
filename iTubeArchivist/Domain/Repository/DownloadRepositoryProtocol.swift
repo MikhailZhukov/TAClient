@@ -6,6 +6,6 @@ protocol DownloadRepositoryProtocol {
     func deleteDownload(videoId: String) async throws
     func addToQueue(videoId: String) async throws
     func startDownload() async throws
-    func getDownloadNotifications() async throws -> [DownloadTaskInfo]
+    func getNotifications() async throws -> [TaskNotification]
     func killTask(id: String) async throws
 }

@@ -87,7 +87,7 @@ final class MockDownloadRepository: DownloadRepositoryProtocol {
     var deleteDownloadHandler: (String) async throws -> Void = { _ in }
     var addToQueueHandler: (String) async throws -> Void = { _ in }
     var startDownloadHandler: () async throws -> Void = {}
-    var getDownloadNotificationsHandler: () async throws -> [DownloadTaskInfo] = { [] }
+    var getNotificationsHandler: () async throws -> [TaskNotification] = { [] }
     var killTaskHandler: (String) async throws -> Void = { _ in }
 
     func getDownloads(page: Int, filter: String) async throws -> DownloadListResult {
@@ -110,8 +110,8 @@ final class MockDownloadRepository: DownloadRepositoryProtocol {
         try await startDownloadHandler()
     }
 
-    func getDownloadNotifications() async throws -> [DownloadTaskInfo] {
-        try await getDownloadNotificationsHandler()
+    func getNotifications() async throws -> [TaskNotification] {
+        try await getNotificationsHandler()
     }
 
     func killTask(id: String) async throws {

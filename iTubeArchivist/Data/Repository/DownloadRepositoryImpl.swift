@@ -48,15 +48,16 @@ final class DownloadRepositoryImpl: DownloadRepositoryProtocol {
         try await apiClient.requestVoid(endpoint: .startDownload)
     }
 
-    func getDownloadNotifications() async throws -> [DownloadTaskInfo] {
+    func getNotifications() async throws -> [TaskNotification] {
         let notifications: [NotificationDTO] = try await apiClient.request(
-            endpoint: .downloadNotifications
+            endpoint: .notifications
         )
 
         return notifications.map { dto in
-            DownloadTaskInfo(
+            TaskNotification(
                 id: dto.id ?? "",
                 title: dto.title ?? "",
+                group: dto.group ?? "",
                 messages: dto.messages ?? [],
                 progress: dto.progress ?? 0,
                 isError: dto.level == "error",
