@@ -48,7 +48,7 @@ struct VideoCardView: View {
                             Spacer()
                             Rectangle()
                                 .fill(Color.red)
-                                .frame(width: geo.size.width * video.progress, height: 3)
+                                .frame(width: geo.size.width * video.progress / 100, height: 3)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
