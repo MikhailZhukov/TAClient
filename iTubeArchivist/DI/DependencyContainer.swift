@@ -23,6 +23,7 @@ final class DependencyContainer {
 
     private init() {
         keychainService = KeychainService()
+        keychainService.migrateToSharedAccessGroup()
         authState = AuthState(keychainService: keychainService)
         apiClient = APIClient(authState: authState)
 

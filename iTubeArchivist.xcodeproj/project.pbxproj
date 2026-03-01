@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		2743D9EB2F4C515900A7114D /* MobileVLCKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC0000022F3FA4BE00000002 /* MobileVLCKit */; };
+		AA000000000000000000000D /* ShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = AA0000010000000000000001 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -25,12 +26,34 @@
 			remoteGlobalIDString = 27D79B152F3FA4BE00E87BCA;
 			remoteInfo = iTubeArchivist;
 		};
+		AA000000000000000000000B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 27D79B0E2F3FA4BE00E87BCA /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA0000060000000000000006;
+			remoteInfo = ShareExtension;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		AA000000000000000000000A /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				AA000000000000000000000D /* ShareExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		27D79B162F3FA4BE00E87BCA /* iTubeArchivist.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = iTubeArchivist.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		27D79B252F3FA4C100E87BCA /* iTubeArchivistTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iTubeArchivistTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		27D79B2F2F3FA4C100E87BCA /* iTubeArchivistUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iTubeArchivistUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA0000010000000000000001 /* ShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -49,7 +72,25 @@
 			path = iTubeArchivistUITests;
 			sourceTree = "<group>";
 		};
+		AA0000020000000000000002 /* ShareExtension */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				AA00000E000000000000000E /* PBXFileSystemSynchronizedBuildFileExceptionSet */,
+			);
+			path = ShareExtension;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		AA00000E000000000000000E /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = AA0000060000000000000006 /* ShareExtension */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		27D79B132F3FA4BE00E87BCA /* Frameworks */ = {
@@ -74,6 +115,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AA0000040000000000000004 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -83,6 +131,7 @@
 				27D79B182F3FA4BE00E87BCA /* iTubeArchivist */,
 				27D79B282F3FA4C100E87BCA /* iTubeArchivistTests */,
 				27D79B322F3FA4C100E87BCA /* iTubeArchivistUITests */,
+				AA0000020000000000000002 /* ShareExtension */,
 				27D79B172F3FA4BE00E87BCA /* Products */,
 			);
 			sourceTree = "<group>";
@@ -93,6 +142,7 @@
 				27D79B162F3FA4BE00E87BCA /* iTubeArchivist.app */,
 				27D79B252F3FA4C100E87BCA /* iTubeArchivistTests.xctest */,
 				27D79B2F2F3FA4C100E87BCA /* iTubeArchivistUITests.xctest */,
+				AA0000010000000000000001 /* ShareExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -107,10 +157,12 @@
 				27D79B122F3FA4BE00E87BCA /* Sources */,
 				27D79B132F3FA4BE00E87BCA /* Frameworks */,
 				27D79B142F3FA4BE00E87BCA /* Resources */,
+				AA000000000000000000000A /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				AA000000000000000000000C /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				27D79B182F3FA4BE00E87BCA /* iTubeArchivist */,
@@ -169,6 +221,28 @@
 			productReference = 27D79B2F2F3FA4C100E87BCA /* iTubeArchivistUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		AA0000060000000000000006 /* ShareExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA0000090000000000000009 /* Build configuration list for PBXNativeTarget "ShareExtension" */;
+			buildPhases = (
+				AA0000030000000000000003 /* Sources */,
+				AA0000040000000000000004 /* Frameworks */,
+				AA0000050000000000000005 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				AA0000020000000000000002 /* ShareExtension */,
+			);
+			name = ShareExtension;
+			packageProductDependencies = (
+			);
+			productName = ShareExtension;
+			productReference = AA0000010000000000000001 /* ShareExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -189,6 +263,9 @@
 					27D79B2E2F3FA4C100E87BCA = {
 						CreatedOnToolsVersion = 26.2;
 						TestTargetID = 27D79B152F3FA4BE00E87BCA;
+					};
+					AA0000060000000000000006 = {
+						CreatedOnToolsVersion = 26.2;
 					};
 				};
 			};
@@ -212,6 +289,7 @@
 				27D79B152F3FA4BE00E87BCA /* iTubeArchivist */,
 				27D79B242F3FA4C100E87BCA /* iTubeArchivistTests */,
 				27D79B2E2F3FA4C100E87BCA /* iTubeArchivistUITests */,
+				AA0000060000000000000006 /* ShareExtension */,
 			);
 		};
 /* End PBXProject section */
@@ -232,6 +310,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		27D79B2D2F3FA4C100E87BCA /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA0000050000000000000005 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -262,6 +347,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AA0000030000000000000003 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -274,6 +366,11 @@
 			isa = PBXTargetDependency;
 			target = 27D79B152F3FA4BE00E87BCA /* iTubeArchivist */;
 			targetProxy = 27D79B302F3FA4C100E87BCA /* PBXContainerItemProxy */;
+		};
+		AA000000000000000000000C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA0000060000000000000006 /* ShareExtension */;
+			targetProxy = AA000000000000000000000B /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -404,6 +501,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = iTubeArchivist/iTubeArchivist.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 5AS4WKH94K;
@@ -437,6 +535,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = iTubeArchivist/iTubeArchivist.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 5AS4WKH94K;
@@ -549,6 +648,62 @@
 			};
 			name = Release;
 		};
+		AA0000070000000000000007 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ShareExtension/ShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 5AS4WKH94K;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = ru.mzhukov.iTubeArchivist.ShareExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		AA0000080000000000000008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ShareExtension/ShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 5AS4WKH94K;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = ru.mzhukov.iTubeArchivist.ShareExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -584,6 +739,15 @@
 			buildConfigurations = (
 				27D79B402F3FA4C100E87BCA /* Debug */,
 				27D79B412F3FA4C100E87BCA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AA0000090000000000000009 /* Build configuration list for PBXNativeTarget "ShareExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA0000070000000000000007 /* Debug */,
+				AA0000080000000000000008 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
