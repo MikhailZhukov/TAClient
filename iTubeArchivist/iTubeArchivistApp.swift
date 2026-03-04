@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct iTubeArchivistApp: App {
     @State private var container = DependencyContainer.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -10,6 +11,21 @@ struct iTubeArchivistApp: App {
                 .environment(container)
                 .environment(container.router)
                 .environment(container.authState)
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .active {
+                        forceLayoutUpdate()
+                    }
+                }
+        }
+    }
+
+    private func forceLayoutUpdate() {
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows {
+                window.rootViewController?.view.setNeedsLayout()
+                window.rootViewController?.view.layoutIfNeeded()
+            }
         }
     }
 }
