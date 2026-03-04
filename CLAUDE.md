@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 69 app files, 26 test files, 188 passing tests.
+iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 69 app files + 1 Share Extension file, 26 test files, 188 passing tests.
 
 ## Build & Run
 
@@ -37,6 +37,8 @@ Presentation/ → Views + @Observable ViewModels per screen (VideoList, VideoDet
 DI/        → DependencyContainer (manual singleton)
 ```
 
+**Separate target:** `ShareExtension/` — iOS Share Extension for adding YouTube videos to download queue from Share sheet.
+
 **Data flow:** View → ViewModel → Repository (protocol) → APIClient → URLSession
 
 **Key patterns:**
@@ -45,6 +47,28 @@ DI/        → DependencyContainer (manual singleton)
 - `ImageCache` actor with `AuthenticatedAsyncImage` for auth'd image loading
 - `AuthState` (@Observable) wraps Keychain reads/writes for token + serverURL
 - Unauthorized (401/403) responses trigger `router.handleUnauthorized()` which clears Keychain and returns to login
+- `scenePhase` observer in `iTubeArchivistApp` forces window layout on `.active` — fixes stale safe area insets after iPad wake from sleep
+
+## Share Extension
+
+`ShareExtension/` is a separate Xcode target (`com.apple.product-type.app-extension`) embedded in the main app.
+
+**Files:**
+- `ShareViewController.swift` — self-contained: inline keychain read, YouTube URL validation, API call, SwiftUI overlay (spinner → checkmark/error → auto-dismiss)
+- `Info.plist` — `NSExtensionActivationRule` inside `NSExtensionAttributes` (NOT directly in `NSExtension`), supports both URL and text sharing
+- `ShareExtension.entitlements` — shared keychain access group
+- `Localizable.xcstrings` — 5 error strings (en + ru)
+
+**Keychain sharing:**
+- Shared access group: `5AS4WKH94K.ru.mzhukov.iTubeArchivist` (both main app and extension entitlements)
+- `KeychainService` uses `kSecAttrAccessGroup` on all queries via `baseQuery(for:)`
+- One-time migration: `migrateToSharedAccessGroup()` called at app launch copies pre-existing keychain items to shared group
+- Extension reads credentials directly via `SecItemCopyMatching` with same service/account/accessGroup
+
+**pbxproj integration:**
+- `PBXFileSystemSynchronizedBuildFileExceptionSet` excludes `Info.plist` from resource copying (avoids "Multiple commands produce Info.plist" conflict)
+- `PBXCopyFilesBuildPhase` with `dstSubfolderSpec = 13` (PlugIns) embeds the `.appex`
+- Extension build settings: `SKIP_INSTALL = YES`, `GENERATE_INFOPLIST_FILE = NO`
 
 ## API Details
 
@@ -56,6 +80,11 @@ DI/        → DependencyContainer (manual singleton)
 - Search param is `query` (not `q`): `GET /api/search/?query=X&page=N`
 - Localization keys use `snake_case`; formatted dates use non-breaking spaces (`\u{00A0}`)
 
+**Important API data formats:**
+- `player.progress` is **0–100** (percentage), NOT 0–1. The TA frontend uses it as CSS `width: ${progress}%`
+- `youtube_id` in add-to-queue accepts **full YouTube URLs** (not just video IDs) — TA server parses them. The browser extension sends video IDs for individual videos, full URLs for channels
+- TA accepts multiple URL formats: `youtube.com/watch?v=`, `youtu.be/`, `youtube.com/shorts/`, `youtube.com/live/`, channel URLs, playlist URLs
+
 **Endpoints:**
 | Method | Path | Notes |
 |--------|------|-------|
@@ -64,7 +93,7 @@ DI/        → DependencyContainer (manual singleton)
 | GET | `/api/ping/` | Health check, returns `{"response": "pong"}` |
 | GET | `/api/video/?page=&sort=&order=&watch=&channel=` | Video list with filters |
 | GET | `/api/video/{id}/` | Video detail |
-| POST | `/api/video/{id}/progress/` | Save progress `{"position": N}` |
+| POST | `/api/video/{id}/progress/` | Save progress `{"position": N}` (seconds) |
 | DELETE | `/api/video/{id}/progress/` | Delete progress |
 | DELETE | `/api/video/{id}/` | Delete video |
 | GET | `/api/video/{id}/comment/` | Video comments |
@@ -104,7 +133,14 @@ Two player paths, selected automatically by `CodecSupport.requiredPlayer(for:)`:
 - `AuthProxy`: actor, NWListener on port 0, set `newConnectionHandler` BEFORE `listener.start()`, auto-restarts on `.failed`
 - VLC controls: UIHostingController intercepts all touches — handle taps in SwiftUI layer (`Color.clear.contentShape(Rectangle()).onTapGesture`)
 - VLC fullscreen: modal `VLCFullScreenVC` reparents BOTH drawable view (`insertSubview(at: 0)`) AND controls host view
+- Both inline and fullscreen controls constrained to `safeAreaLayoutGuide`
 - Progress saved every 10s; VLC also saves on stop via `lastVLCPosition`
+
+## iPad
+
+- All screens wrapped in `NavigationStack` for proper safe area handling
+- VLC controls constrained to `safeAreaLayoutGuide` in both inline and fullscreen modes
+- **Wake from sleep fix:** `scenePhase == .active` triggers `forceLayoutUpdate()` on all windows — recalculates safe area insets that go stale after device sleep in landscape
 
 ## Testing
 
