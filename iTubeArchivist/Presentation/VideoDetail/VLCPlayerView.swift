@@ -65,8 +65,8 @@ extension VLCPlayerView {
             let state = player.state
             Task { @MainActor in
                 self.containerVC?.updatePlayingState(player.isPlaying)
-                if state == .error || state == .ended {
-                    logger.error("Player state: \(state == .error ? "error" : "ended"), attempting restart")
+                if state == .error {
+                    logger.error("Player state: error, attempting restart")
                     self.containerVC?.restartMedia()
                 }
             }
