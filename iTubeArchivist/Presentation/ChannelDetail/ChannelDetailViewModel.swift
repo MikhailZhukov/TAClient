@@ -13,9 +13,9 @@ final class ChannelDetailViewModel {
     private var lastPage = 1
     private var canLoadMore: Bool { currentPage < lastPage && !isLoadingMore }
 
+    let router: AppRouter
     private let channelRepository: ChannelRepositoryProtocol
     private let videoRepository: VideoRepositoryProtocol
-    private let router: AppRouter
 
     init(channelId: String, channelRepository: ChannelRepositoryProtocol, videoRepository: VideoRepositoryProtocol, router: AppRouter) {
         self.channelId = channelId
@@ -71,6 +71,11 @@ final class ChannelDetailViewModel {
         } catch {}
 
         isLoadingMore = false
+    }
+
+    func removeDeletedVideos() {
+        guard !router.deletedVideoIds.isEmpty else { return }
+        videos.removeAll { router.deletedVideoIds.contains($0.youtubeId) }
     }
 
     func navigateToVideo(_ videoId: String) {

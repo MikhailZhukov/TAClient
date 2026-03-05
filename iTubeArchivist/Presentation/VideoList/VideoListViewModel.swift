@@ -16,9 +16,9 @@ final class VideoListViewModel {
     private var lastPage = 1
     private var canLoadMore: Bool { currentPage < lastPage && !isLoadingMore }
 
+    let router: AppRouter
     private let videoRepository: VideoRepositoryProtocol
     private let authRepository: AuthRepositoryProtocol
-    private let router: AppRouter
 
     init(videoRepository: VideoRepositoryProtocol, authRepository: AuthRepositoryProtocol, router: AppRouter) {
         self.videoRepository = videoRepository
@@ -94,6 +94,11 @@ final class VideoListViewModel {
     func logout() {
         authRepository.logout()
         router.handleUnauthorized()
+    }
+
+    func removeDeletedVideos() {
+        guard !router.deletedVideoIds.isEmpty else { return }
+        videos.removeAll { router.deletedVideoIds.contains($0.youtubeId) }
     }
 
     func navigateToVideo(_ videoId: String) {

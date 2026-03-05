@@ -10,6 +10,7 @@ enum AppState {
 final class AppRouter {
     var path = NavigationPath()
     var appState: AppState
+    private(set) var deletedVideoIds: Set<String> = []
 
     private let authState: AuthState
 
@@ -25,6 +26,10 @@ final class AppRouter {
     func goBack() {
         guard !path.isEmpty else { return }
         path.removeLast()
+    }
+
+    func markVideoDeleted(_ videoId: String) {
+        deletedVideoIds.insert(videoId)
     }
 
     func handleUnauthorized() {

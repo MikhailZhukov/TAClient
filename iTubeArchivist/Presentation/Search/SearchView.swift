@@ -34,6 +34,9 @@ struct SearchView: View {
         .onChange(of: viewModel.query) {
             viewModel.onQueryChanged()
         }
+        .onChange(of: viewModel.router.deletedVideoIds) {
+            viewModel.removeDeletedVideos()
+        }
         .navigationTitle(String(localized: "video_list_search"))
         .navigationBarTitleDisplayMode(.inline)
     }

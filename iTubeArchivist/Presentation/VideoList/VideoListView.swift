@@ -96,5 +96,8 @@ struct VideoListView: View {
         .onChange(of: viewModel.watchFilter) {
             Task { await viewModel.onSortOrFilterChanged() }
         }
+        .onChange(of: viewModel.router.deletedVideoIds) {
+            viewModel.removeDeletedVideos()
+        }
     }
 }

@@ -7,9 +7,9 @@ final class SearchViewModel {
     var isLoading = false
     var hasSearched = false
 
+    let router: AppRouter
     private var searchTask: Task<Void, Never>?
     private let searchRepository: SearchRepositoryProtocol
-    private let router: AppRouter
 
     init(searchRepository: SearchRepositoryProtocol, router: AppRouter) {
         self.searchRepository = searchRepository
@@ -53,6 +53,11 @@ final class SearchViewModel {
             }
         } catch {}
         isLoading = false
+    }
+
+    func removeDeletedVideos() {
+        guard !router.deletedVideoIds.isEmpty else { return }
+        videos.removeAll { router.deletedVideoIds.contains($0.youtubeId) }
     }
 
     func navigateToVideo(_ videoId: String) {

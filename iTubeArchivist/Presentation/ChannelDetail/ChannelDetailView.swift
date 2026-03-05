@@ -40,6 +40,9 @@ struct ChannelDetailView: View {
         .task {
             await viewModel.loadChannel()
         }
+        .onChange(of: viewModel.router.deletedVideoIds) {
+            viewModel.removeDeletedVideos()
+        }
     }
 
     @ViewBuilder
