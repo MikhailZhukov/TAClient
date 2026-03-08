@@ -80,7 +80,9 @@ final class DownloadQueueViewModel {
             try await downloadRepository.updateStatus(videoId: videoId, status: status)
         } catch {
             pendingRemovals.remove(videoId)
-            router.handleError(error, errorMessage: &errorMessage)
+            if !router.handleError(error, errorMessage: &errorMessage) {
+                await loadDownloads(isRefresh: true)
+            }
         }
     }
 
@@ -213,7 +215,9 @@ final class DownloadQueueViewModel {
             try await downloadRepository.deleteDownload(videoId: videoId)
         } catch {
             pendingRemovals.remove(videoId)
-            router.handleError(error, errorMessage: &errorMessage)
+            if !router.handleError(error, errorMessage: &errorMessage) {
+                await loadDownloads(isRefresh: true)
+            }
         }
     }
 

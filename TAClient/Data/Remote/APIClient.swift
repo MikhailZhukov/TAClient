@@ -144,6 +144,14 @@ final class APIClient {
         }
 
         let tokenDTO = try Self.decoder.decode(TokenResponseDTO.self, from: tokenData)
+
+        // Clear session cookies so they don't leak into subsequent logins to different servers
+        if let cookies = loginSession.configuration.httpCookieStorage?.cookies(for: serverURL) {
+            for cookie in cookies {
+                loginSession.configuration.httpCookieStorage?.deleteCookie(cookie)
+            }
+        }
+
         return tokenDTO.token
     }
 }

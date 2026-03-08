@@ -263,7 +263,7 @@ final class VideoDetailViewModel {
            CodecSupport.requiredPlayer(for: video.streams) == .avPlayer,
            let url = URL(string: video.mediaUrl),
            let token = authState.token {
-            await VideoCache.shared.startPreload(
+            await VideoCache.shared.startPreloadWithRetry(
                 videoId: video.youtubeId,
                 url: url,
                 token: token,

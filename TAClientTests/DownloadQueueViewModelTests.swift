@@ -71,7 +71,7 @@ struct DownloadQueueViewModelTests {
         #expect(vm.items.contains(where: { $0.youtubeId == idToRemove }) == false)
     }
 
-    @Test func updateStatus_error_restoresPendingRemovals() async {
+    @Test func updateStatus_error_refetchesItems() async {
         let repo = MockDownloadRepository()
         repo.getDownloadsHandler = { _, _ in
             TestData.downloadListResult(count: 2)
@@ -82,11 +82,13 @@ struct DownloadQueueViewModelTests {
         let (vm, _) = makeSUT(downloadRepo: repo)
 
         await vm.loadDownloads()
+        #expect(vm.items.count == 2)
         let idToRemove = vm.items[0].youtubeId
         await vm.updateStatus(videoId: idToRemove, status: "ignore")
 
-        // Item was optimistically removed but error message is set
-        #expect(vm.errorMessage != nil)
+        // After error, items are refetched from server — all 2 items restored
+        #expect(vm.items.count == 2)
+        #expect(vm.items.contains(where: { $0.youtubeId == idToRemove }))
     }
 
     @Test func addToQueue_emptyInput_guards() async {

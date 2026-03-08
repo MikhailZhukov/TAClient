@@ -265,4 +265,28 @@ actor VideoCache {
 
         preloadTask = nil
     }
+
+    /// Retry wrapper: retries transient network errors with exponential backoff.
+    func startPreloadWithRetry(videoId: String, url: URL, token: String, startPosition: Double = 0, duration: Double = 0, maxRetries: Int = 2) {
+        preloadTask?.cancel()
+        preloadTask = nil
+
+        let task = Task { [weak self] in
+            guard let self else { return }
+            for attempt in 0...maxRetries {
+                if Task.isCancelled { break }
+                if attempt > 0 {
+                    let delay = Double(1 << (attempt - 1)) // 1s, 2s
+                    logger.info("Retry \(attempt)/\(maxRetries) for \(videoId) in \(Int(delay))s")
+                    try? await Task.sleep(for: .seconds(delay))
+                    if Task.isCancelled { break }
+                }
+                await self.downloadVideo(videoId: videoId, url: url, token: token, startPosition: startPosition, duration: duration)
+                // If we got data or task was cancelled, don't retry
+                if let entry = await self.entry, entry.videoId == videoId, entry.cachedByteCount > 0 { break }
+                if Task.isCancelled { break }
+            }
+        }
+        preloadTask = task
+    }
 }
