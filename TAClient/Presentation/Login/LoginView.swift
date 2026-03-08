@@ -75,5 +75,6 @@ struct LoginView: View {
 
             Spacer()
         }
+        .geometryGroup()
     }
 }

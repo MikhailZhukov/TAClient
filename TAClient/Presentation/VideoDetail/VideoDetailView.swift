@@ -16,6 +16,7 @@ struct VideoDetailView: View {
                 videoContent(video)
             }
         }
+        .geometryGroup()
         .navigationTitle(viewModel.video?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

@@ -28,6 +28,7 @@ struct SearchView: View {
                     )
                     .padding(.vertical)
                 }
+                .geometryGroup()
             }
         }
         .searchable(text: $viewModel.query, prompt: String(localized: "search_hint"))

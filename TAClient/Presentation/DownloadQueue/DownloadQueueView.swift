@@ -98,6 +98,7 @@ struct DownloadQueueView: View {
                 }
             }
         }
+        .geometryGroup()
         .safeAreaInset(edge: .top) {
             HStack(spacing: 8) {
                 TextField(String(localized: "download_add_placeholder"), text: Bindable(viewModel).addInput)

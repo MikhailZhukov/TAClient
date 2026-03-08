@@ -33,6 +33,7 @@ struct ChannelDetailView: View {
                         }
                     }
                 }
+                .geometryGroup()
             }
         }
         .navigationTitle(viewModel.channel?.channelName ?? "")
