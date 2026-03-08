@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-iOS%2026.2-blue" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-iOS%2017.0%2B-blue" alt="Platform">
   <img src="https://img.shields.io/badge/swift-6-orange" alt="Swift">
   <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License">
 </p>
@@ -32,7 +32,7 @@
 
 ## Requirements
 
-- iOS/iPadOS 26.2+
+- iOS/iPadOS 17.0+
 - Xcode 26.2+
 - A running [Tube Archivist](https://github.com/tubearchivist/tubearchivist) server
 

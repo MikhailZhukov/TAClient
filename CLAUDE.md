@@ -16,7 +16,7 @@ TAClient — iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchi
 /bin/bash -c 'xcodebuild test -scheme TAClient -destination "platform=iOS Simulator,name=iPhone 17 Pro"'
 ```
 
-- Xcode 26.2, iOS 26.2 deployment target
+- Xcode 26.2, iOS 17.0 deployment target
 - Swift concurrency: `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, `SWIFT_APPROACHABLE_CONCURRENCY = YES`
 - String Catalog localization (en + ru) via `Localizable.xcstrings`
 - SPM dependency: `MobileVLCKit-SPM` (`https://github.com/MobileVLCKit-SPM/MobileVLCKit-SPM`)
