@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" width="128" height="128" alt="TA Client logo">
+  <img src="docs/logo.png" alt="TA Client logo">
 </p>
 
 <h1 align="center">TA Client</h1>
