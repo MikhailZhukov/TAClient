@@ -47,6 +47,7 @@ struct VideoListView: View {
                     }
                     .padding(.vertical)
                 }
+                .geometryGroup()
                 .refreshable {
                     await viewModel.refresh()
                 }
@@ -67,18 +68,21 @@ struct VideoListView: View {
                     } label: {
                         Image(systemName: "arrow.down.circle")
                     }
+                    .accessibilityLabel(String(localized: "download_queue_title"))
 
                     Button {
                         viewModel.navigateToSearch()
                     } label: {
                         Image(systemName: "magnifyingglass")
                     }
+                    .accessibilityLabel(String(localized: "search_hint"))
 
                     Button {
                         viewModel.logout()
                     } label: {
                         Image(systemName: "rectangle.portrait.and.arrow.right")
                     }
+                    .accessibilityLabel(String(localized: "video_list_logout"))
                 }
             }
         }

@@ -28,6 +28,7 @@ struct DownloadQueueView: View {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.secondary)
                     }
+                    .accessibilityLabel(String(localized: "dismiss"))
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 8)

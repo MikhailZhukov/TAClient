@@ -58,6 +58,7 @@ struct VLCPlayerControls: View {
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                         .font(.title2)
                 }
+                .accessibilityLabel(isPlaying ? String(localized: "vlc_pause") : String(localized: "vlc_play"))
 
                 Spacer()
 
@@ -69,6 +70,7 @@ struct VLCPlayerControls: View {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                         .font(.caption)
                 }
+                .accessibilityLabel(String(localized: "vlc_fullscreen"))
                 .padding(.leading, 8)
             }
         }

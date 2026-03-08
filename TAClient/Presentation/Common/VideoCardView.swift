@@ -78,11 +78,14 @@ struct VideoCardView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+            .accessibilityLabel(video.channelName)
             .onTapGesture {
                 if !video.channelId.isEmpty {
                     onChannelTap?(video.channelId)
                 }
             }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(video.title), \(video.channelName), \(video.durationStr)")
     }
 }

@@ -28,12 +28,14 @@ struct VideoDetailView: View {
                         } label: {
                             Image(systemName: viewModel.isPinned ? "pin.fill" : "pin")
                         }
+                        .accessibilityLabel(String(localized: "video_detail_pin_player"))
                     }
                     Button {
                         viewModel.showDeleteDialog = true
                     } label: {
                         Image(systemName: "trash")
                     }
+                    .accessibilityLabel(String(localized: "video_detail_delete_title"))
                 }
             }
         }
@@ -146,6 +148,7 @@ struct VideoDetailView: View {
                                     .foregroundStyle(.white)
                             }
                     }
+                    .accessibilityLabel(String(localized: "video_detail_play"))
                 }
             }
             .aspectRatio(16.0 / 9.0, contentMode: .fit)

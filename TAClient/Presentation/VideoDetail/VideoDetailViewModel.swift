@@ -123,7 +123,8 @@ final class VideoDetailViewModel {
             let keepUp = player.currentItem?.isPlaybackLikelyToKeepUp ?? false
             logger.info("timeControlStatus=\(status.rawValue) reason=\(reason) pos=\(pos)s bufferEmpty=\(bufferEmpty) keepUp=\(keepUp)")
             if status == .playing {
-                Task { @MainActor in self?.isBuffering = false }
+                guard let self else { return }
+                Task { @MainActor in self.isBuffering = false }
             } else {
                 self?.logCacheHealth(videoId: cachedVideoId, playbackPosition: Double(pos), duration: duration)
             }
