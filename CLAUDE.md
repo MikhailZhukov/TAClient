@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 69 app files + 1 Share Extension file, 26 test files, 188 passing tests.
+TAClient — iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 69 app files + 1 Share Extension file, 26 test files, 188 passing tests. Renamed from iTubeArchivist.
 
 ## Build & Run
 
@@ -21,6 +21,7 @@ iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearch
 - String Catalog localization (en + ru) via `Localizable.xcstrings`
 - SPM dependency: `MobileVLCKit-SPM` (`https://github.com/MobileVLCKit-SPM/MobileVLCKit-SPM`)
 - FileSystemSynchronizedRootGroup — Xcode auto-detects new files, no need to add to project
+- Bundle ID: `ru.mzhukov.TAClient`, display name: "TA Client"
 
 ## Architecture
 
@@ -43,12 +44,12 @@ DI/        → DependencyContainer (manual singleton)
 
 **Key patterns:**
 - `@Observable` ViewModels (iOS 17+) — no `@Published` needed
-- `AppRouter` (@Observable) manages app state (splash → login → main) and `NavigationStack` path via typed `Route` enum
+- `AppRouter` (@Observable) manages app state (splash → login → main), `NavigationStack` path via typed `Route` enum, and `deletedVideoIds` for cross-screen video removal
 - `ImageCache` actor with `AuthenticatedAsyncImage` for auth'd image loading
 - `AuthState` (@Observable) wraps Keychain reads/writes for token + serverURL
 - Unauthorized (401/403) responses trigger `router.handleUnauthorized()` which clears Keychain and returns to login
 - `scenePhase` observer in `TAClientApp` forces window layout on `.active` — fixes stale safe area insets after iPad wake from sleep
-- **Renamed from iTubeArchivist:** keychain migration in `KeychainService.migrateFromOldServiceName()` handles old installs
+- Deleted videos removed from all lists (VideoList, ChannelDetail, Search) via `AppRouter.deletedVideoIds` + `.onChange` observers — no full reload needed
 
 ## Share Extension
 
@@ -63,7 +64,6 @@ DI/        → DependencyContainer (manual singleton)
 **Keychain sharing:**
 - Shared access group: `5AS4WKH94K.ru.mzhukov.TAClient` (both main app and extension entitlements)
 - `KeychainService` uses `kSecAttrAccessGroup` on all queries via `baseQuery(for:)`
-- One-time migration: `migrateFromOldServiceName()` called at app launch migrates keychain items from old `ru.mzhukov.iTubeArchivist` service/group
 - Extension reads credentials directly via `SecItemCopyMatching` with same service/account/accessGroup
 
 **pbxproj integration:**
@@ -136,6 +136,7 @@ Two player paths, selected automatically by `CodecSupport.requiredPlayer(for:)`:
 - VLC fullscreen: modal `VLCFullScreenVC` reparents BOTH drawable view (`insertSubview(at: 0)`) AND controls host view
 - Both inline and fullscreen controls constrained to `safeAreaLayoutGuide`
 - Progress saved every 10s; VLC also saves on stop via `lastVLCPosition`
+- VLC restarts media only on `.error` state (NOT `.ended`) — restarting on `.ended` causes infinite loop of last seconds
 
 ## iPad
 
