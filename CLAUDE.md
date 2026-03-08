@@ -10,10 +10,10 @@ iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearch
 
 ```bash
 # Build (shell has persistent zsh parse error — always use /bin/bash -c)
-/bin/bash -c 'xcodebuild build -scheme iTubeArchivist -destination "platform=iOS Simulator,name=iPhone 17 Pro"'
+/bin/bash -c 'xcodebuild build -scheme TAClient -destination "platform=iOS Simulator,name=iPhone 17 Pro"'
 
 # Run tests
-/bin/bash -c 'xcodebuild test -scheme iTubeArchivist -destination "platform=iOS Simulator,name=iPhone 17 Pro"'
+/bin/bash -c 'xcodebuild test -scheme TAClient -destination "platform=iOS Simulator,name=iPhone 17 Pro"'
 ```
 
 - Xcode 26.2, iOS 26.2 deployment target
@@ -24,7 +24,7 @@ iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearch
 
 ## Architecture
 
-Clean Architecture with three layers, all under `iTubeArchivist/`:
+Clean Architecture with three layers, all under `TAClient/`:
 
 ```
 Domain/    → Models (Video, Channel, Comment, DownloadItem, DownloadTaskInfo, PlayerInfo)
@@ -47,7 +47,8 @@ DI/        → DependencyContainer (manual singleton)
 - `ImageCache` actor with `AuthenticatedAsyncImage` for auth'd image loading
 - `AuthState` (@Observable) wraps Keychain reads/writes for token + serverURL
 - Unauthorized (401/403) responses trigger `router.handleUnauthorized()` which clears Keychain and returns to login
-- `scenePhase` observer in `iTubeArchivistApp` forces window layout on `.active` — fixes stale safe area insets after iPad wake from sleep
+- `scenePhase` observer in `TAClientApp` forces window layout on `.active` — fixes stale safe area insets after iPad wake from sleep
+- **Renamed from iTubeArchivist:** keychain migration in `KeychainService.migrateFromOldServiceName()` handles old installs
 
 ## Share Extension
 
@@ -60,9 +61,9 @@ DI/        → DependencyContainer (manual singleton)
 - `Localizable.xcstrings` — 5 error strings (en + ru)
 
 **Keychain sharing:**
-- Shared access group: `5AS4WKH94K.ru.mzhukov.iTubeArchivist` (both main app and extension entitlements)
+- Shared access group: `5AS4WKH94K.ru.mzhukov.TAClient` (both main app and extension entitlements)
 - `KeychainService` uses `kSecAttrAccessGroup` on all queries via `baseQuery(for:)`
-- One-time migration: `migrateToSharedAccessGroup()` called at app launch copies pre-existing keychain items to shared group
+- One-time migration: `migrateFromOldServiceName()` called at app launch migrates keychain items from old `ru.mzhukov.iTubeArchivist` service/group
 - Extension reads credentials directly via `SecItemCopyMatching` with same service/account/accessGroup
 
 **pbxproj integration:**

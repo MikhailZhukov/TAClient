@@ -98,9 +98,9 @@ class ShareViewController: UIViewController {
     private func keychainLoad(_ account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "ru.mzhukov.iTubeArchivist",
+            kSecAttrService as String: "ru.mzhukov.TAClient",
             kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: "5AS4WKH94K.ru.mzhukov.iTubeArchivist",
+            kSecAttrAccessGroup as String: "5AS4WKH94K.ru.mzhukov.TAClient",
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
