@@ -181,6 +181,9 @@ private struct AVPlayerView: UIViewControllerRepresentable {
         let controller = AVPlayerViewController()
         controller.player = player
         controller.delegate = context.coordinator
+        if let item = player.currentItem {
+            context.coordinator.observeEnd(of: item, playerVC: controller)
+        }
         return controller
     }
 
@@ -188,14 +191,34 @@ private struct AVPlayerView: UIViewControllerRepresentable {
         context.coordinator.isFullScreen = $isFullScreen
         if controller.player !== player {
             controller.player = player
+            if let item = player.currentItem {
+                context.coordinator.observeEnd(of: item, playerVC: controller)
+            }
         }
     }
 
     class Coordinator: NSObject, AVPlayerViewControllerDelegate {
         var isFullScreen: Binding<Bool>
+        private var endObserver: Any?
+        private weak var playerVC: AVPlayerViewController?
 
         init(isFullScreen: Binding<Bool>) {
             self.isFullScreen = isFullScreen
+        }
+
+        func observeEnd(of playerItem: AVPlayerItem, playerVC: AVPlayerViewController) {
+            self.playerVC = playerVC
+            endObserver.map { NotificationCenter.default.removeObserver($0) }
+            endObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: playerItem,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self, let vc = self.playerVC else { return }
+                if vc.presentedViewController != nil || vc.isBeingPresented {
+                    vc.dismiss(animated: true)
+                }
+            }
         }
 
         func playerViewController(
@@ -223,6 +246,10 @@ private struct AVPlayerView: UIViewControllerRepresentable {
             restoreUserInterfaceForFullScreenExitWithCompletionHandler completionHandler: @escaping (Bool) -> Void
         ) {
             completionHandler(true)
+        }
+
+        deinit {
+            endObserver.map { NotificationCenter.default.removeObserver($0) }
         }
     }
 }

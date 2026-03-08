@@ -68,6 +68,8 @@ extension VLCPlayerView {
                 if state == .error {
                     logger.error("Player state: error, attempting restart")
                     self.containerVC?.restartMedia()
+                } else if state == .ended {
+                    self.containerVC?.exitFullScreenIfNeeded()
                 }
             }
         }
@@ -224,6 +226,12 @@ class VLCPlayerContainerVC: UIViewController {
     func updatePlayingState(_ playing: Bool) {
         isMediaPlaying = playing
         refreshControls()
+    }
+
+    func exitFullScreenIfNeeded() {
+        if let presented = presentedViewController as? VLCFullScreenVC {
+            presented.dismiss(animated: true)
+        }
     }
 
     // MARK: - Actions
