@@ -26,6 +26,16 @@ struct LoginView: View {
                             viewModel.serverURL = "https://"
                         }
                     }
+                    .onChange(of: viewModel.serverURL) {
+                        let url = viewModel.serverURL
+                        for scheme in ["https://", "http://"] {
+                            let doubled = scheme + scheme
+                            if url.hasPrefix(doubled) {
+                                viewModel.serverURL = String(url.dropFirst(scheme.count))
+                                return
+                            }
+                        }
+                    }
 
                 TextField(String(localized: "login_username"), text: $viewModel.username)
                     .textFieldStyle(.roundedBorder)
