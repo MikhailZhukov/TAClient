@@ -11,21 +11,22 @@ struct VideoInfoSection: View {
                 .font(.headline)
 
             // Channel
-            HStack(spacing: 8) {
-                AuthenticatedAsyncImage(
-                    url: video.channelThumbUrl,
-                    placeholderColor: Color(hex: 0x3A3A3A)
-                )
-                .frame(width: 32, height: 32)
-                .clipShape(Circle())
-
-                Text(video.channelName)
-                    .font(.subheadline)
-                    .foregroundStyle(Color.accentColor)
-            }
-            .onTapGesture {
+            Button {
                 if !video.channelId.isEmpty {
                     onChannelTap?(video.channelId)
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    AuthenticatedAsyncImage(
+                        url: video.channelThumbUrl,
+                        placeholderColor: Color(.tertiarySystemBackground)
+                    )
+                    .frame(width: 32, height: 32)
+                    .clipShape(Circle())
+
+                    Text(video.channelName)
+                        .font(.subheadline)
+                        .foregroundStyle(Color.accentColor)
                 }
             }
 

@@ -68,7 +68,7 @@ struct LoginView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(viewModel.isLoading)
+                .disabled(viewModel.isLoading || viewModel.serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.password.isEmpty)
             }
             .frame(maxWidth: 400)
             .padding(.horizontal)

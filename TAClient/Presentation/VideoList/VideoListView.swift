@@ -2,6 +2,7 @@ import SwiftUI
 
 struct VideoListView: View {
     @State var viewModel: VideoListViewModel
+    @State private var showLogoutConfirmation = false
 
     var body: some View {
         @Bindable var viewModel = viewModel
@@ -78,7 +79,7 @@ struct VideoListView: View {
                     .accessibilityLabel(String(localized: "search_hint"))
 
                     Button {
-                        viewModel.logout()
+                        showLogoutConfirmation = true
                     } label: {
                         Image(systemName: "rectangle.portrait.and.arrow.right")
                     }
@@ -102,6 +103,16 @@ struct VideoListView: View {
         }
         .onChange(of: viewModel.router.deletedVideoIds) {
             viewModel.removeDeletedVideos()
+        }
+        .confirmationDialog(
+            String(localized: "video_list_logout"),
+            isPresented: $showLogoutConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(String(localized: "video_list_logout"), role: .destructive) {
+                viewModel.logout()
+            }
+            Button(String(localized: "cancel"), role: .cancel) {}
         }
     }
 }

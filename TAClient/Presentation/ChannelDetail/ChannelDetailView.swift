@@ -60,7 +60,7 @@ struct ChannelDetailView: View {
                 HStack(spacing: 12) {
                     AuthenticatedAsyncImage(
                         url: channel.channelThumbUrl,
-                        placeholderColor: Color(hex: 0x3A3A3A)
+                        placeholderColor: Color(.tertiarySystemBackground)
                     )
                     .frame(width: 64, height: 64)
                     .clipShape(Circle())

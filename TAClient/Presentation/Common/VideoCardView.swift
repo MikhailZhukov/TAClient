@@ -65,25 +65,26 @@ struct VideoCardView: View {
                 .frame(height: UIFont.preferredFont(forTextStyle: .subheadline).lineHeight * 2 + 4)
 
             // Channel info
-            HStack(spacing: 8) {
-                AuthenticatedAsyncImage(
-                    url: video.channelThumbUrl,
-                    placeholderColor: Color(hex: 0x3A3A3A)
-                )
-                .frame(width: 20, height: 20)
-                .clipShape(Circle())
-
-                Text(video.channelName)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .accessibilityLabel(video.channelName)
-            .onTapGesture {
+            Button {
                 if !video.channelId.isEmpty {
                     onChannelTap?(video.channelId)
                 }
+            } label: {
+                HStack(spacing: 8) {
+                    AuthenticatedAsyncImage(
+                        url: video.channelThumbUrl,
+                        placeholderColor: Color(.tertiarySystemBackground)
+                    )
+                    .frame(width: 20, height: 20)
+                    .clipShape(Circle())
+
+                    Text(video.channelName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
+            .accessibilityLabel(video.channelName)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(video.title), \(video.channelName), \(video.durationStr)")

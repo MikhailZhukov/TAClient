@@ -10,7 +10,7 @@ struct CommentRow: View {
             HStack(alignment: .top, spacing: 8) {
                 AuthenticatedAsyncImage(
                     url: comment.authorThumbnailUrl,
-                    placeholderColor: Color(hex: 0x3A3A3A)
+                    placeholderColor: Color(.tertiarySystemBackground)
                 )
                 .frame(width: 32, height: 32)
                 .clipShape(Circle())

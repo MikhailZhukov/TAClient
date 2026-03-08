@@ -516,6 +516,38 @@
         }
       }
     },
+    "sort_ascending" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sort ascending"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "По возрастанию"
+          }
+        }
+      }
+    },
+    "sort_descending" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sort descending"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "По убыванию"
+          }
+        }
+      }
+    },
     "sort_downloaded" : {
       "localizations" : {
         "en" : {

@@ -90,6 +90,7 @@ struct SortFilterBar: View {
                         .background(.fill.tertiary)
                         .clipShape(Circle())
                 }
+                .accessibilityLabel(String(localized: sortAscending ? "sort_ascending" : "sort_descending"))
 
                 Divider()
                     .frame(height: 24)
