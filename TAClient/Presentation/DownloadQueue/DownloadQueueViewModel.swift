@@ -62,7 +62,8 @@ final class DownloadQueueViewModel {
         let nextPage = currentPage + 1
         do {
             let result = try await downloadRepository.getDownloads(page: nextPage, filter: filter)
-            items.append(contentsOf: result.items)
+            let existingIds = Set(items.map(\.youtubeId))
+            items.append(contentsOf: result.items.filter { !existingIds.contains($0.youtubeId) })
             currentPage = result.currentPage
             lastPage = result.lastPage
         } catch {

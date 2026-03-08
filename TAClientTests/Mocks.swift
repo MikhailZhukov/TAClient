@@ -216,10 +216,11 @@ enum TestData {
 
     static func videoListResult(
         count: Int = 3,
+        startIndex: Int = 0,
         currentPage: Int = 1,
         lastPage: Int = 1
     ) -> VideoListResult {
-        let videos = (0..<count).map { i in
+        let videos = (startIndex..<startIndex + count).map { i in
             video(youtubeId: "video-\(i)", title: "Video \(i)")
         }
         return VideoListResult(videos: videos, currentPage: currentPage, lastPage: lastPage, totalHits: count)

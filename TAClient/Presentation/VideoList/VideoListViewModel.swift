@@ -65,7 +65,8 @@ final class VideoListViewModel {
                 watch: watchFilter.queryValue,
                 channel: nil
             )
-            videos.append(contentsOf: result.videos)
+            let existingIds = Set(videos.map(\.youtubeId))
+            videos.append(contentsOf: result.videos.filter { !existingIds.contains($0.youtubeId) })
             currentPage = result.currentPage
             lastPage = result.lastPage
         } catch {

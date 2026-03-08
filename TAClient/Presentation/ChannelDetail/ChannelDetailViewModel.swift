@@ -55,7 +55,8 @@ final class ChannelDetailViewModel {
             let result = try await videoRepository.getVideos(
                 page: nextPage, sort: "published", order: "desc", watch: nil, channel: channelId
             )
-            videos.append(contentsOf: result.videos)
+            let existingIds = Set(videos.map(\.youtubeId))
+            videos.append(contentsOf: result.videos.filter { !existingIds.contains($0.youtubeId) })
             currentPage = result.currentPage
             lastPage = result.lastPage
         } catch {

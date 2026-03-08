@@ -85,7 +85,7 @@ struct ChannelDetailViewModelTests {
             if page == 1 {
                 return TestData.videoListResult(count: 3, currentPage: 1, lastPage: 2)
             } else {
-                return TestData.videoListResult(count: 2, currentPage: 2, lastPage: 2)
+                return TestData.videoListResult(count: 2, startIndex: 3, currentPage: 2, lastPage: 2)
             }
         }
         let (vm, _) = makeSUT(videoRepo: videoRepo)
