@@ -67,27 +67,6 @@ xcodebuild test -scheme TAClient -destination "platform=iOS Simulator,name=iPhon
 
 The project has 188 passing tests covering mappers, ViewModels, and the full data layer.
 
-## Architecture
-
-Clean Architecture with three layers:
-
-```
-TAClient/
-├── Domain/         Models, repository protocols, error types
-├── Data/           API client, DTOs, mappers, repositories, keychain, cache
-├── Presentation/   SwiftUI views + @Observable ViewModels
-└── DI/             Manual dependency injection container
-
-ShareExtension/     Self-contained iOS Share Extension
-```
-
-**Key technical decisions:**
-- [MobileVLCKit](https://github.com/nicholasdly/MobileVLCKit-SPM) for VP9 codec support (not available in AVPlayer)
-- `@Observable` ViewModels (iOS 17+) — no Combine, no `@Published`
-- In-memory chunked video cache (`[Data]` sliding window) with `AVAssetResourceLoaderDelegate`
-- Local HTTP proxy (`NWListener`) for injecting auth headers into VLC requests
-- Keychain sharing between app and Share Extension via access group
-
 ## AI Attribution
 
 The majority of this project was built with [Claude Code](https://claude.ai/code) (Anthropic).
