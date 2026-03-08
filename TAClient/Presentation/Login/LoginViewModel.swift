@@ -11,7 +11,7 @@ final class LoginViewModel {
     private let authRepository: AuthRepositoryProtocol
     private let router: AppRouter
 
-    init(authRepository: AuthRepositoryProtocol, authState: AuthState, router: AppRouter) {
+    init(authRepository: AuthRepositoryProtocol, router: AppRouter) {
         self.authRepository = authRepository
         self.router = router
     }
@@ -32,10 +32,8 @@ final class LoginViewModel {
                 password: password
             )
             router.onLoginSuccess()
-        } catch let error as AppError {
-            errorMessage = error.errorDescription
         } catch {
-            errorMessage = String(localized: "error_generic")
+            router.handleError(error, errorMessage: &errorMessage)
         }
 
         isLoading = false

@@ -6,6 +6,7 @@ final class SearchViewModel {
     var videos: [Video] = []
     var isLoading = false
     var hasSearched = false
+    var errorMessage: String?
 
     let router: AppRouter
     private var searchTask: Task<Void, Never>?
@@ -47,11 +48,9 @@ final class SearchViewModel {
                 videos = result.videos
                 hasSearched = true
             }
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            }
-        } catch {}
+        } catch {
+            router.handleError(error, errorMessage: &errorMessage)
+        }
         isLoading = false
     }
 

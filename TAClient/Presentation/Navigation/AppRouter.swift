@@ -49,4 +49,20 @@ final class AppRouter {
         authState.handleUnauthorized()
         appState = .login
     }
+
+    /// Handles errors from async repository calls.
+    /// Returns `true` if the error was unauthorized (caller should stop further work).
+    @discardableResult
+    func handleError(_ error: Error, errorMessage: inout String?) -> Bool {
+        if let appError = error as? AppError, case .unauthorized = appError {
+            handleUnauthorized()
+            return true
+        }
+        if let appError = error as? AppError {
+            errorMessage = appError.errorDescription
+        } else {
+            errorMessage = String(localized: "error_generic")
+        }
+        return false
+    }
 }

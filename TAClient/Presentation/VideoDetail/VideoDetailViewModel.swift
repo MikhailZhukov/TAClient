@@ -254,14 +254,8 @@ final class VideoDetailViewModel {
 
         do {
             video = try await videoRepository.getVideo(id: videoId)
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            } else {
-                errorMessage = error.errorDescription
-            }
         } catch {
-            errorMessage = String(localized: "error_generic")
+            router.handleError(error, errorMessage: &errorMessage)
         }
 
         // Start preloading for AVPlayer videos
@@ -304,11 +298,9 @@ final class VideoDetailViewModel {
             await VideoCache.shared.clear()
             router.markVideoDeleted(videoId)
             router.goBack()
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            }
-        } catch {}
+        } catch {
+            router.handleError(error, errorMessage: &errorMessage)
+        }
     }
 
     func deleteAndIgnoreVideo() async {
@@ -319,11 +311,9 @@ final class VideoDetailViewModel {
             await VideoCache.shared.clear()
             router.markVideoDeleted(videoId)
             router.goBack()
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            }
-        } catch {}
+        } catch {
+            router.handleError(error, errorMessage: &errorMessage)
+        }
     }
 
     func navigateToChannel(_ channelId: String) {

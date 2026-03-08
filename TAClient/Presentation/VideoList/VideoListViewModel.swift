@@ -45,14 +45,8 @@ final class VideoListViewModel {
             currentPage = result.currentPage
             lastPage = result.lastPage
             if isRefresh { refreshCount &+= 1 }
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            } else {
-                errorMessage = error.errorDescription
-            }
         } catch {
-            errorMessage = String(localized: "error_generic")
+            router.handleError(error, errorMessage: &errorMessage)
         }
 
         isLoading = false
@@ -74,11 +68,9 @@ final class VideoListViewModel {
             videos.append(contentsOf: result.videos)
             currentPage = result.currentPage
             lastPage = result.lastPage
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            }
-        } catch {}
+        } catch {
+            router.handleError(error, errorMessage: &errorMessage)
+        }
 
         isLoadingMore = false
     }

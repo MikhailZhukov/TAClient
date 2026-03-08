@@ -38,7 +38,7 @@ final class DependencyContainer {
     // MARK: - ViewModel Factories
 
     func makeLoginViewModel() -> LoginViewModel {
-        LoginViewModel(authRepository: authRepository, authState: authState, router: router)
+        LoginViewModel(authRepository: authRepository, router: router)
     }
 
     func makeVideoListViewModel() -> VideoListViewModel {

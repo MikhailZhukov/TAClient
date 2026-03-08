@@ -38,14 +38,8 @@ final class DownloadQueueViewModel {
             items = result.items
             currentPage = result.currentPage
             lastPage = result.lastPage
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            } else {
-                errorMessage = error.errorDescription
-            }
         } catch {
-            errorMessage = String(localized: "error_generic")
+            router.handleError(error, errorMessage: &errorMessage)
         }
 
         isLoading = false
@@ -71,11 +65,9 @@ final class DownloadQueueViewModel {
             items.append(contentsOf: result.items)
             currentPage = result.currentPage
             lastPage = result.lastPage
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            }
-        } catch {}
+        } catch {
+            router.handleError(error, errorMessage: &errorMessage)
+        }
 
         isLoadingMore = false
     }
@@ -86,16 +78,9 @@ final class DownloadQueueViewModel {
 
         do {
             try await downloadRepository.updateStatus(videoId: videoId, status: status)
-        } catch let error as AppError {
-            pendingRemovals.remove(videoId)
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            } else {
-                errorMessage = error.errorDescription
-            }
         } catch {
             pendingRemovals.remove(videoId)
-            errorMessage = String(localized: "error_generic")
+            router.handleError(error, errorMessage: &errorMessage)
         }
     }
 
@@ -107,14 +92,8 @@ final class DownloadQueueViewModel {
             try await downloadRepository.addToQueue(videoId: input)
             addInput = ""
             await loadDownloads(isRefresh: true)
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            } else {
-                errorMessage = error.errorDescription
-            }
         } catch {
-            errorMessage = String(localized: "error_generic")
+            router.handleError(error, errorMessage: &errorMessage)
         }
         isAdding = false
     }
@@ -124,14 +103,8 @@ final class DownloadQueueViewModel {
         do {
             try await downloadRepository.startDownload()
             startPolling()
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            } else {
-                errorMessage = error.errorDescription
-            }
         } catch {
-            errorMessage = String(localized: "error_generic")
+            router.handleError(error, errorMessage: &errorMessage)
         }
         isStartingDownload = false
     }
@@ -143,14 +116,8 @@ final class DownloadQueueViewModel {
             stopPolling()
             downloadProgress = []
             await loadDownloads(isRefresh: true)
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            } else {
-                errorMessage = error.errorDescription
-            }
         } catch {
-            errorMessage = String(localized: "error_generic")
+            router.handleError(error, errorMessage: &errorMessage)
         }
     }
 
@@ -222,29 +189,16 @@ final class DownloadQueueViewModel {
             downloadItemQueue.remove(id)
             do {
                 try await downloadRepository.updateStatus(videoId: id, status: "priority")
-            } catch let error as AppError {
-                if case .unauthorized = error {
-                    router.handleUnauthorized()
-                    return
-                }
-                errorMessage = error.errorDescription
             } catch {
-                errorMessage = String(localized: "error_generic")
+                if router.handleError(error, errorMessage: &errorMessage) { return }
             }
         }
 
         if pollingTask == nil {
             do {
                 try await downloadRepository.startDownload()
-            } catch let error as AppError {
-                if case .unauthorized = error {
-                    router.handleUnauthorized()
-                    return
-                }
-                errorMessage = error.errorDescription
-                return
             } catch {
-                errorMessage = String(localized: "error_generic")
+                router.handleError(error, errorMessage: &errorMessage)
                 return
             }
         }
@@ -257,16 +211,9 @@ final class DownloadQueueViewModel {
 
         do {
             try await downloadRepository.deleteDownload(videoId: videoId)
-        } catch let error as AppError {
-            pendingRemovals.remove(videoId)
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            } else {
-                errorMessage = error.errorDescription
-            }
         } catch {
             pendingRemovals.remove(videoId)
-            errorMessage = String(localized: "error_generic")
+            router.handleError(error, errorMessage: &errorMessage)
         }
     }
 

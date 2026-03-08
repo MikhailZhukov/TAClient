@@ -1,6 +1,8 @@
 import Foundation
 
 final class APIClient {
+    private static let decoder = JSONDecoder()
+
     private let authState: AuthState
     private let session: URLSession
     private let loginSession: URLSession
@@ -29,8 +31,7 @@ final class APIClient {
     ) async throws -> T {
         let data = try await rawRequest(endpoint: endpoint, body: body, baseURL: baseURL)
         do {
-            let decoder = JSONDecoder()
-            return try decoder.decode(T.self, from: data)
+            return try Self.decoder.decode(T.self, from: data)
         } catch {
             throw AppError.decoding(underlying: error)
         }
@@ -142,7 +143,7 @@ final class APIClient {
             throw AppError.serverError(statusCode: 0, message: "Failed to retrieve token")
         }
 
-        let tokenDTO = try JSONDecoder().decode(TokenResponseDTO.self, from: tokenData)
+        let tokenDTO = try Self.decoder.decode(TokenResponseDTO.self, from: tokenData)
         return tokenDTO.token
     }
 }

@@ -39,14 +39,8 @@ final class ChannelDetailViewModel {
             videos = videoResult.videos
             currentPage = videoResult.currentPage
             lastPage = videoResult.lastPage
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            } else {
-                errorMessage = error.errorDescription
-            }
         } catch {
-            errorMessage = String(localized: "error_generic")
+            router.handleError(error, errorMessage: &errorMessage)
         }
 
         isLoading = false
@@ -64,11 +58,9 @@ final class ChannelDetailViewModel {
             videos.append(contentsOf: result.videos)
             currentPage = result.currentPage
             lastPage = result.lastPage
-        } catch let error as AppError {
-            if case .unauthorized = error {
-                router.handleUnauthorized()
-            }
-        } catch {}
+        } catch {
+            router.handleError(error, errorMessage: &errorMessage)
+        }
 
         isLoadingMore = false
     }

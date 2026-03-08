@@ -32,15 +32,18 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     // MARK: - URL Conversion
 
     static func cachingURL(from url: URL) -> URL? {
-        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let originalScheme = components.scheme else { return nil }
         components.scheme = cachingScheme
+        components.fragment = originalScheme
         return components.url
     }
 
     static func originalURL(from url: URL) -> URL? {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.scheme == cachingScheme else { return nil }
-        components.scheme = "https"
+        components.scheme = components.fragment ?? "https"
+        components.fragment = nil
         return components.url
     }
 

@@ -11,7 +11,7 @@ struct LoginViewModelTests {
         keychain.clearAll()
         let authState = AuthState(keychainService: keychain)
         let router = AppRouter(authState: authState)
-        let vm = LoginViewModel(authRepository: authRepo, authState: authState, router: router)
+        let vm = LoginViewModel(authRepository: authRepo, router: router)
         return (vm, router, authRepo)
     }
 
