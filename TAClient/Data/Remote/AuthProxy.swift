@@ -8,7 +8,6 @@ actor AuthProxy {
     private var port: UInt16 = 0
     private let token: String
     private let serverBaseURL: URL
-    private var proxySession: URLSession?
 
     var localPort: UInt16 { port }
 
@@ -18,11 +17,6 @@ actor AuthProxy {
     }
 
     func start() async throws {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 0
-        config.timeoutIntervalForResource = 0
-        self.proxySession = URLSession(configuration: config)
-
         let params = NWParameters.tcp
         params.acceptLocalOnly = true
         let listener = try NWListener(using: params, on: .any)
@@ -90,8 +84,6 @@ actor AuthProxy {
     func stop() {
         listener?.cancel()
         listener = nil
-        proxySession?.invalidateAndCancel()
-        proxySession = nil
         port = 0
     }
 
@@ -163,16 +155,12 @@ actor AuthProxy {
 
         // Stream response to avoid loading entire video into memory
         do {
-            guard let session = proxySession else {
-                Self.sendError(connection, code: 502)
-                return
-            }
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = 0
+            config.timeoutIntervalForResource = 0
 
-            let (asyncBytes, response) = try await session.bytes(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                Self.sendError(connection, code: 502)
-                return
-            }
+            let streamer = StreamingSession()
+            let (httpResponse, chunks) = try await streamer.stream(request: request, configuration: config)
 
             // Build response header
             var header = "HTTP/1.1 \(httpResponse.statusCode)"
@@ -200,20 +188,23 @@ actor AuthProxy {
                 return
             }
 
-            // Stream body in chunks
+            // Stream body — chunks arrive as Data from delegate, forward directly
+            let sendChunkSize = 256 * 1024
             var buffer = Data()
-            let chunkSize = 256 * 1024
-            for try await byte in asyncBytes {
-                buffer.append(byte)
-                if buffer.count >= chunkSize {
-                    let chunk = buffer
-                    buffer = Data()
+            for try await chunk in chunks {
+                buffer.append(chunk)
+                while buffer.count >= sendChunkSize {
+                    let sendData = Data(buffer.prefix(sendChunkSize))
+                    buffer = Data(buffer.dropFirst(sendChunkSize))
                     let ok = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-                        connection.send(content: chunk, completion: .contentProcessed { error in
+                        connection.send(content: sendData, completion: .contentProcessed { error in
                             cont.resume(returning: error == nil)
                         })
                     }
-                    if !ok { break }
+                    if !ok {
+                        connection.cancel()
+                        return
+                    }
                 }
             }
 

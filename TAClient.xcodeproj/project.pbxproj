@@ -57,19 +57,19 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		AA00000F000000000000000F /* Exceptions for "TAClient" folder in "TAClient" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = 27D79B152F3FA4BE00E87BCA /* TAClient */;
-		};
 		AA00000E000000000000000E /* Exceptions for "ShareExtension" folder in "ShareExtension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
 			);
 			target = AA0000060000000000000006 /* ShareExtension */;
+		};
+		AA00000F000000000000000F /* Exceptions for "TAClient" folder in "TAClient" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 27D79B152F3FA4BE00E87BCA /* TAClient */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 

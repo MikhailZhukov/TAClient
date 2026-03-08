@@ -49,7 +49,8 @@ extension VLCPlayerView {
             let totalDuration = Double(abs(player.remainingTime?.intValue ?? 0)) / 1000.0 + seconds
 
             Task { @MainActor in
-                self.containerVC?.updateTime(current: seconds, duration: totalDuration)
+                self.containerVC?.playerState.currentTime = seconds
+                if totalDuration > 0 { self.containerVC?.playerState.duration = totalDuration }
             }
 
             if Date().timeIntervalSince(lastProgressReport) >= 10 {
@@ -64,7 +65,7 @@ extension VLCPlayerView {
             guard let player = aNotification.object as? VLCMediaPlayer else { return }
             let state = player.state
             Task { @MainActor in
-                self.containerVC?.updatePlayingState(player.isPlaying)
+                self.containerVC?.playerState.isPlaying = player.isPlaying
                 if state == .error {
                     logger.error("Player state: error, attempting restart")
                     self.containerVC?.restartMedia()
@@ -80,6 +81,7 @@ extension VLCPlayerView {
 
 class VLCPlayerContainerVC: UIViewController {
     let drawableView = UIView()
+    let playerState: VLCPlayerState
     var mediaPlayer: VLCMediaPlayer?
 
     private let mediaURL: URL
@@ -88,18 +90,16 @@ class VLCPlayerContainerVC: UIViewController {
     private weak var coordinator: VLCPlayerView.Coordinator?
 
     fileprivate var controlsHost: UIHostingController<VLCPlayerControls>?
-    private var controlsVisible = true
     private var hideTimer: Timer?
-    private var currentTime: Double = 0
-    private var currentDuration: Double = 0
-    private var isMediaPlaying = false
 
     init(mediaURL: URL, startPosition: Double, duration: Double, coordinator: VLCPlayerView.Coordinator) {
+        let state = VLCPlayerState()
+        state.duration = duration
+        self.playerState = state
         self.mediaURL = mediaURL
         self.startPosition = startPosition
         self.initialDuration = duration
         self.coordinator = coordinator
-        self.currentDuration = duration
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -129,7 +129,7 @@ class VLCPlayerContainerVC: UIViewController {
     }
 
     func restartMedia() {
-        let resumePosition = currentTime
+        let resumePosition = playerState.currentTime
         mediaPlayer?.stop()
 
         let media = VLCMedia(url: mediaURL)
@@ -137,10 +137,10 @@ class VLCPlayerContainerVC: UIViewController {
         mediaPlayer?.media = media
         mediaPlayer?.play()
 
-        if resumePosition > 0, currentDuration > 0 {
+        if resumePosition > 0, playerState.duration > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 guard let self, let player = self.mediaPlayer else { return }
-                let position = Float(resumePosition / self.currentDuration)
+                let position = Float(resumePosition / self.playerState.duration)
                 player.position = min(max(position, 0), 1)
             }
         }
@@ -184,7 +184,13 @@ class VLCPlayerContainerVC: UIViewController {
     // MARK: - Controls
 
     private func setupControls() {
-        let controls = makeControls()
+        let controls = VLCPlayerControls(
+            state: playerState,
+            onPlayPause: { [weak self] in self?.togglePlayPause() },
+            onSeek: { [weak self] seconds in self?.seek(to: seconds) },
+            onToggleFullScreen: { [weak self] in self?.toggleFullScreen() },
+            onTapToggle: { [weak self] in self?.handleTap() }
+        )
         let host = UIHostingController(rootView: controls)
         host.view.backgroundColor = .clear
         host.view.translatesAutoresizingMaskIntoConstraints = false
@@ -198,34 +204,6 @@ class VLCPlayerContainerVC: UIViewController {
         ])
         host.didMove(toParent: self)
         controlsHost = host
-    }
-
-    private func makeControls() -> VLCPlayerControls {
-        VLCPlayerControls(
-            isPlaying: isMediaPlaying,
-            currentTime: currentTime,
-            duration: currentDuration,
-            visible: controlsVisible,
-            onPlayPause: { [weak self] in self?.togglePlayPause() },
-            onSeek: { [weak self] seconds in self?.seek(to: seconds) },
-            onToggleFullScreen: { [weak self] in self?.toggleFullScreen() },
-            onTapToggle: { [weak self] in self?.handleTap() }
-        )
-    }
-
-    private func refreshControls() {
-        controlsHost?.rootView = makeControls()
-    }
-
-    func updateTime(current: Double, duration: Double) {
-        currentTime = current
-        if duration > 0 { currentDuration = duration }
-        refreshControls()
-    }
-
-    func updatePlayingState(_ playing: Bool) {
-        isMediaPlaying = playing
-        refreshControls()
     }
 
     func exitFullScreenIfNeeded() {
@@ -243,8 +221,8 @@ class VLCPlayerContainerVC: UIViewController {
     }
 
     private func seek(to seconds: Double) {
-        guard let player = mediaPlayer, currentDuration > 0 else { return }
-        let position = Float(seconds / currentDuration)
+        guard let player = mediaPlayer, playerState.duration > 0 else { return }
+        let position = Float(seconds / playerState.duration)
         player.position = min(max(position, 0), 1)
         scheduleHideControls()
     }
@@ -273,23 +251,19 @@ class VLCPlayerContainerVC: UIViewController {
     }
 
     private func handleTap() {
-        controlsVisible.toggle()
-        if controlsVisible {
+        playerState.controlsVisible.toggle()
+        if playerState.controlsVisible {
             scheduleHideControls()
         } else {
             hideTimer?.invalidate()
         }
-        refreshControls()
     }
 
     private func scheduleHideControls() {
         hideTimer?.invalidate()
-        controlsVisible = true
-        refreshControls()
+        playerState.controlsVisible = true
         hideTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            self.controlsVisible = false
-            self.refreshControls()
+            self?.playerState.controlsVisible = false
         }
     }
 }

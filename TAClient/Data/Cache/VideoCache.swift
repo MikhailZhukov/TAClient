@@ -161,7 +161,6 @@ actor VideoCache {
         let config = URLSessionConfiguration.default
         config.httpCookieStorage = nil
         config.urlCache = nil  // prevent response caching — we manage our own cache
-        let session = URLSession(configuration: config)
 
         var byteOffset: Int64 = 0
         var knownTotalSize: Int64 = -1
@@ -171,7 +170,8 @@ actor VideoCache {
             headRequest.httpMethod = "HEAD"
             headRequest.setValue("Token \(token)", forHTTPHeaderField: "Authorization")
 
-            if let (_, headResponse) = try? await session.data(for: headRequest),
+            let headSession = URLSession(configuration: config)
+            if let (_, headResponse) = try? await headSession.data(for: headRequest),
                let http = headResponse as? HTTPURLResponse {
                 knownTotalSize = http.expectedContentLength
                 if knownTotalSize > 0 {
@@ -189,10 +189,10 @@ actor VideoCache {
         }
 
         do {
-            let (bytes, response) = try await session.bytes(for: request)
+            let streamer = StreamingSession()
+            let (httpResponse, chunks) = try await streamer.stream(request: request, configuration: config)
 
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200...299).contains(httpResponse.statusCode) || httpResponse.statusCode == 206 else {
+            guard (200...299).contains(httpResponse.statusCode) || httpResponse.statusCode == 206 else {
                 logger.error("Preload failed for \(videoId): bad status")
                 return
             }
@@ -223,15 +223,16 @@ actor VideoCache {
             var buffer = Data()
             buffer.reserveCapacity(Self.chunkSize)
 
-            for try await byte in bytes {
+            for try await chunk in chunks {
                 if Task.isCancelled { break }
 
-                buffer.append(byte)
+                buffer.append(chunk)
 
-                if buffer.count >= Self.chunkSize {
-                    entry?.chunks.append(buffer)
-                    entry?.cachedByteCount += buffer.count
-                    buffer.removeAll(keepingCapacity: true)
+                while buffer.count >= Self.chunkSize {
+                    let cacheChunk = Data(buffer.prefix(Self.chunkSize))
+                    buffer = Data(buffer.dropFirst(Self.chunkSize))
+                    entry?.chunks.append(cacheChunk)
+                    entry?.cachedByteCount += cacheChunk.count
 
                     // Sliding window: trim chunks well behind playback position
                     if let entry, entry.cachedByteCount > Self.trimThreshold {

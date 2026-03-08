@@ -1,10 +1,15 @@
 import SwiftUI
 
+@Observable
+final class VLCPlayerState {
+    var isPlaying = false
+    var currentTime: Double = 0
+    var duration: Double = 0
+    var controlsVisible = true
+}
+
 struct VLCPlayerControls: View {
-    let isPlaying: Bool
-    let currentTime: Double
-    let duration: Double
-    let visible: Bool
+    let state: VLCPlayerState
     let onPlayPause: () -> Void
     let onSeek: (Double) -> Void
     let onToggleFullScreen: () -> Void
@@ -20,7 +25,7 @@ struct VLCPlayerControls: View {
                 .contentShape(Rectangle())
                 .onTapGesture { onTapToggle() }
 
-            if visible {
+            if state.controlsVisible {
                 VStack {
                     Spacer()
                     controlsBar
@@ -28,18 +33,18 @@ struct VLCPlayerControls: View {
                 .transition(.opacity)
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: visible)
+        .animation(.easeInOut(duration: 0.25), value: state.controlsVisible)
     }
 
     private var controlsBar: some View {
         VStack(spacing: 8) {
             Slider(
-                value: isSeeking ? $seekValue : .constant(currentTime),
-                in: 0...max(duration, 1),
+                value: isSeeking ? $seekValue : .constant(state.currentTime),
+                in: 0...max(state.duration, 1),
                 onEditingChanged: { editing in
                     if editing {
                         isSeeking = true
-                        seekValue = currentTime
+                        seekValue = state.currentTime
                     } else {
                         isSeeking = false
                         onSeek(seekValue)
@@ -48,21 +53,21 @@ struct VLCPlayerControls: View {
             )
 
             HStack {
-                Text(formatTime(isSeeking ? seekValue : currentTime))
+                Text(formatTime(isSeeking ? seekValue : state.currentTime))
                     .font(.caption)
                     .monospacedDigit()
 
                 Spacer()
 
                 Button(action: onPlayPause) {
-                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
                         .font(.title2)
                 }
-                .accessibilityLabel(isPlaying ? String(localized: "vlc_pause") : String(localized: "vlc_play"))
+                .accessibilityLabel(state.isPlaying ? String(localized: "vlc_pause") : String(localized: "vlc_play"))
 
                 Spacer()
 
-                Text(formatTime(duration))
+                Text(formatTime(state.duration))
                     .font(.caption)
                     .monospacedDigit()
 
