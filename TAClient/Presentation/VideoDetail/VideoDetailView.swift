@@ -91,18 +91,34 @@ struct VideoDetailView: View {
     @ViewBuilder
     private func playerArea(_ video: Video) -> some View {
         if let player = viewModel.player {
-            AVPlayerView(player: player, isFullScreen: $viewModel.isFullScreen)
-                .aspectRatio(16.0 / 9.0, contentMode: .fill)
-                .frame(maxWidth: .infinity)
-                .clipped()
+            ZStack {
+                AVPlayerView(player: player, isFullScreen: $viewModel.isFullScreen)
+                if viewModel.isBuffering {
+                    Color.black
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(.white)
+                }
+            }
+            .aspectRatio(16.0 / 9.0, contentMode: .fill)
+            .frame(maxWidth: .infinity)
+            .clipped()
         } else if let vlcURL = viewModel.vlcMediaURL {
-            VLCPlayerView(
-                mediaURL: vlcURL,
-                startPosition: viewModel.startPosition,
-                duration: Double(video.duration),
-                onTimeChanged: { seconds in viewModel.onVLCTimeChanged(seconds: seconds) },
-                isFullScreen: $viewModel.isFullScreen
-            )
+            ZStack {
+                VLCPlayerView(
+                    mediaURL: vlcURL,
+                    startPosition: viewModel.startPosition,
+                    duration: Double(video.duration),
+                    onTimeChanged: { seconds in viewModel.onVLCTimeChanged(seconds: seconds) },
+                    isFullScreen: $viewModel.isFullScreen
+                )
+                if viewModel.isBuffering {
+                    Color.black
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(.white)
+                }
+            }
             .aspectRatio(16.0 / 9.0, contentMode: .fill)
             .frame(maxWidth: .infinity)
             .clipped()
@@ -113,17 +129,23 @@ struct VideoDetailView: View {
                     .frame(maxWidth: .infinity)
                     .clipped()
 
-                Button {
-                    viewModel.startPlayback()
-                } label: {
-                    Circle()
-                        .fill(.black.opacity(0.6))
-                        .frame(width: 72, height: 72)
-                        .overlay {
-                            Image(systemName: "play.fill")
-                                .font(.title)
-                                .foregroundStyle(.white)
-                        }
+                if viewModel.isBuffering {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(.white)
+                } else {
+                    Button {
+                        viewModel.startPlayback()
+                    } label: {
+                        Circle()
+                            .fill(.black.opacity(0.6))
+                            .frame(width: 72, height: 72)
+                            .overlay {
+                                Image(systemName: "play.fill")
+                                    .font(.title)
+                                    .foregroundStyle(.white)
+                            }
+                    }
                 }
             }
             .aspectRatio(16.0 / 9.0, contentMode: .fit)

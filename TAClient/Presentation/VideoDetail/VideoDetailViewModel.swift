@@ -21,6 +21,7 @@ final class VideoDetailViewModel {
     private(set) var playerType: PlayerType = .avPlayer
     private(set) var vlcMediaURL: URL?
     var isPlaying: Bool { player != nil || vlcMediaURL != nil }
+    private(set) var isBuffering = false
 
     private let videoRepository: VideoRepositoryProtocol
     private let authState: AuthState
@@ -46,8 +47,9 @@ final class VideoDetailViewModel {
     }
 
     func startPlayback() {
-        guard !isPlaying, let video else { return }
+        guard !isPlaying && !isBuffering, let video else { return }
 
+        isBuffering = true
         let requiredPlayer = CodecSupport.requiredPlayer(for: video.streams)
         playerType = requiredPlayer
 
@@ -120,7 +122,9 @@ final class VideoDetailViewModel {
             let bufferEmpty = player.currentItem?.isPlaybackBufferEmpty ?? false
             let keepUp = player.currentItem?.isPlaybackLikelyToKeepUp ?? false
             logger.info("timeControlStatus=\(status.rawValue) reason=\(reason) pos=\(pos)s bufferEmpty=\(bufferEmpty) keepUp=\(keepUp)")
-            if status != .playing {
+            if status == .playing {
+                Task { @MainActor in self?.isBuffering = false }
+            } else {
                 self?.logCacheHealth(videoId: cachedVideoId, playbackPosition: Double(pos), duration: duration)
             }
         }
@@ -197,6 +201,7 @@ final class VideoDetailViewModel {
 
     func onVLCTimeChanged(seconds: Double) {
         if seconds > 0 {
+            if isBuffering { isBuffering = false }
             lastVLCPosition = seconds
             Task { await saveProgress(position: seconds) }
         }
@@ -205,6 +210,7 @@ final class VideoDetailViewModel {
     // MARK: - Stop
 
     func stopPlayback() {
+        isBuffering = false
         // Stop AVPlayer
         if let player {
             statusObservation?.invalidate()
