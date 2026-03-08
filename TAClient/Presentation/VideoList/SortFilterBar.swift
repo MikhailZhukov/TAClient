@@ -45,72 +45,52 @@ enum WatchFilter: String, CaseIterable {
     }
 }
 
-struct SortFilterBar: View {
+struct SortFilterMenu: View {
     @Binding var sortOption: SortOption
     @Binding var sortAscending: Bool
     @Binding var watchFilter: WatchFilter
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                // Sort dropdown
-                Menu {
+        Menu {
+            // Sort section
+            Section(String(localized: "sort_section_title")) {
+                Picker(selection: $sortOption) {
                     ForEach(SortOption.allCases, id: \.self) { option in
-                        Button {
-                            sortOption = option
-                        } label: {
-                            HStack {
-                                Text(option.label)
-                                if sortOption == option {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
+                        Text(option.label).tag(option)
                     }
                 } label: {
-                    HStack(spacing: 4) {
-                        Text(sortOption.label)
-                            .font(.subheadline)
-                        Image(systemName: "chevron.down")
-                            .font(.caption2)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(.fill.tertiary)
-                    .clipShape(Capsule())
+                    Text(String(localized: "sort_section_title"))
                 }
 
-                // Sort order toggle
                 Button {
                     sortAscending.toggle()
                 } label: {
-                    Image(systemName: sortAscending ? "arrow.up" : "arrow.down")
-                        .font(.subheadline)
-                        .padding(8)
-                        .background(.fill.tertiary)
-                        .clipShape(Circle())
-                }
-                .accessibilityLabel(String(localized: sortAscending ? "sort_ascending" : "sort_descending"))
-
-                Divider()
-                    .frame(height: 24)
-
-                // Watch filter chips
-                ForEach(WatchFilter.allCases, id: \.self) { filter in
-                    Button {
-                        watchFilter = filter
-                    } label: {
-                        Text(filter.label)
-                            .font(.subheadline)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(watchFilter == filter ? Color.accentColor : Color(.systemFill))
-                            .foregroundStyle(watchFilter == filter ? .white : .primary)
-                            .clipShape(Capsule())
-                    }
+                    Label(
+                        String(localized: sortAscending ? "sort_ascending" : "sort_descending"),
+                        systemImage: sortAscending ? "arrow.up" : "arrow.down"
+                    )
                 }
             }
-            .padding(.horizontal)
+
+            // Filter section
+            Section(String(localized: "filter_section_title")) {
+                Picker(selection: $watchFilter) {
+                    ForEach(WatchFilter.allCases, id: \.self) { filter in
+                        Text(filter.label).tag(filter)
+                    }
+                } label: {
+                    Text(String(localized: "filter_section_title"))
+                }
+            }
+        } label: {
+            Image(systemName: hasActiveFilters
+                  ? "line.3.horizontal.decrease.circle.fill"
+                  : "line.3.horizontal.decrease.circle")
         }
+        .accessibilityLabel(String(localized: "sort_filter_button"))
+    }
+
+    private var hasActiveFilters: Bool {
+        sortOption != .downloaded || sortAscending || watchFilter != .unwatched
     }
 }

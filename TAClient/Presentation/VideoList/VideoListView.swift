@@ -21,12 +21,6 @@ struct VideoListView: View {
             } else {
                 ScrollView {
                     VStack(spacing: 12) {
-                        SortFilterBar(
-                            sortOption: $viewModel.sortOption,
-                            sortAscending: $viewModel.sortAscending,
-                            watchFilter: $viewModel.watchFilter
-                        )
-
                         AdaptiveVideoGrid(
                             videos: viewModel.videos,
                             onVideoTap: { videoId in
@@ -64,6 +58,12 @@ struct VideoListView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 16) {
+                    SortFilterMenu(
+                        sortOption: $viewModel.sortOption,
+                        sortAscending: $viewModel.sortAscending,
+                        watchFilter: $viewModel.watchFilter
+                    )
+
                     Button {
                         viewModel.navigateToDownloadQueue()
                     } label: {
