@@ -16,6 +16,7 @@ enum VideoMapper {
             published: DateFormatting.formatISO(dto.published, style: .medium),
             publishedShort: DateFormatting.formatISO(dto.published, style: .short),
             downloaded: DateFormatting.formatUnixTimestamp(dto.dateDownloaded, style: .medium),
+            downloadedShort: DateFormatting.formatUnixTimestamp(dto.dateDownloaded, style: .short),
             channelName: dto.channel?.channelName ?? "",
             channelId: dto.channel?.channelId ?? "",
             channelThumbUrl: resolveURL(dto.channel?.channelThumbUrl, baseURL: baseURL),

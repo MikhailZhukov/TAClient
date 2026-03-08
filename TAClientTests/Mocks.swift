@@ -137,6 +137,7 @@ enum TestData {
             published: "2024-01-01",
             publishedShort: "Jan 1",
             downloaded: "2024-01-02",
+            downloadedShort: "1/2/24",
             channelName: "Test Channel",
             channelId: "test-channel-id",
             channelThumbUrl: "https://example.com/thumb.jpg",

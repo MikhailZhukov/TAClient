@@ -9,6 +9,7 @@ struct Video: Identifiable, Hashable {
     let published: String
     let publishedShort: String
     let downloaded: String
+    let downloadedShort: String
     let channelName: String
     let channelId: String
     let channelThumbUrl: String?

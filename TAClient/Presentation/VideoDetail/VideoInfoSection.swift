@@ -29,62 +29,64 @@ struct VideoInfoSection: View {
                 }
             }
 
-            // Stats row
-            HStack(spacing: 16) {
-                Label("\(video.viewCount)", systemImage: "eye")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Label("\(video.likeCount)", systemImage: "hand.thumbsup")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            // Dates
-            VStack(alignment: .leading, spacing: 4) {
-                Text(String(localized: "video_detail_published \(video.published)"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(String(localized: "video_detail_downloaded \(video.downloaded)"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            // Media info
-            if !video.streams.isEmpty {
-                Divider()
-                mediaInfoSection
+            // Stats/dates + Media info
+            ViewThatFits(in: .horizontal) {
+                datesAndMedia(short: false)
+                datesAndMedia(short: true)
             }
         }
         .padding(.horizontal)
     }
 
     @ViewBuilder
+    private func datesAndMedia(short: Bool) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 16) {
+                    Label("\(video.viewCount)", systemImage: "eye")
+                    Label("\(video.likeCount)", systemImage: "hand.thumbsup")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                Text(String(localized: "video_detail_published \(short ? video.publishedShort : video.published)"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(String(localized: "video_detail_downloaded \(short ? video.downloadedShort : video.downloaded)"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !video.streams.isEmpty {
+                Spacer()
+                mediaInfoSection
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
     private var mediaInfoSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .trailing, spacing: 4) {
             ForEach(video.streams, id: \.self) { stream in
-                HStack {
+                HStack(spacing: 4) {
                     Text(stream.type.capitalized)
-                        .font(.caption)
                         .fontWeight(.medium)
-                        .foregroundStyle(.secondary)
                     Text(stream.codec)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                     if let w = stream.width, let h = stream.height {
                         Text("\(w)x\(h)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                     if stream.bitrate > 0 {
                         Text("\(stream.bitrate / 1000)kbps")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize()
             }
             Text(String(localized: "video_detail_file_size \(FormattedFileSize.format(video.mediaSize))"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize()
         }
     }
 }
