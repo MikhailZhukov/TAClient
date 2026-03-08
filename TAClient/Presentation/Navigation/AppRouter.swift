@@ -35,11 +35,13 @@ final class AppRouter {
     func handleUnauthorized() {
         authState.handleUnauthorized()
         path = NavigationPath()
+        deletedVideoIds.removeAll()
         appState = .login
     }
 
     func onLoginSuccess() {
         path = NavigationPath()
+        deletedVideoIds.removeAll()
         appState = .authenticated
     }
 

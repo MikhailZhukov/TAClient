@@ -257,6 +257,9 @@ actor VideoCache {
             logger.info("Preload cancelled for \(videoId)")
         } catch {
             logger.error("Preload error for \(videoId): \(error.localizedDescription)")
+            if let entry, entry.cachedByteCount == 0 {
+                self.entry = nil
+            }
         }
 
         preloadTask = nil

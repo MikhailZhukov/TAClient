@@ -28,14 +28,17 @@ actor AuthProxy {
         let listener = try NWListener(using: params, on: .any)
 
         listener.newConnectionHandler = { [weak self] connection in
-            guard let self else { return }
+            guard let self else { connection.cancel(); return }
             connection.start(queue: .global(qos: .userInitiated))
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, error in
                 guard let data, error == nil else {
                     connection.cancel()
                     return
                 }
-                Task { await self.processHTTPRequest(data, connection: connection) }
+                Task { [weak self] in
+                    guard let self else { connection.cancel(); return }
+                    await self.processHTTPRequest(data, connection: connection)
+                }
             }
         }
 
