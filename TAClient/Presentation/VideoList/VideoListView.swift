@@ -51,10 +51,32 @@ struct VideoListView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                Text(String(localized: "video_list_title"))
-                    .font(.title2)
-                    .fontWeight(.bold)
+                Menu {
+                    ForEach(VidTypeFilter.allCases, id: \.self) { type in
+                        Button {
+                            viewModel.setVidType(type)
+                        } label: {
+                            if viewModel.vidTypeFilter == type {
+                                Label(type.label, systemImage: "checkmark")
+                            } else {
+                                Text(type.label)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(viewModel.vidTypeFilter == .all
+                             ? String(localized: "video_list_title")
+                             : viewModel.vidTypeFilter.label)
+                            .font(.title2)
+                            .fontWeight(.bold)
+                        Image(systemName: "chevron.down")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                    }
                     .fixedSize()
+                }
+                .accessibilityLabel(String(localized: "vid_type_section_title"))
             }
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 16) {

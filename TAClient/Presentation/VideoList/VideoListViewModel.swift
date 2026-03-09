@@ -10,6 +10,7 @@ final class VideoListViewModel {
     var sortOption: SortOption = .downloaded
     var sortAscending: Bool = false
     var watchFilter: WatchFilter = .unwatched
+    var vidTypeFilter: VidTypeFilter = .all
     private(set) var refreshCount = 0
 
     private var currentPage = 1
@@ -39,7 +40,8 @@ final class VideoListViewModel {
                 sort: sortOption.rawValue,
                 order: sortAscending ? "asc" : "desc",
                 watch: watchFilter.queryValue,
-                channel: nil
+                channel: nil,
+                vidType: vidTypeFilter.queryValue
             )
             videos = result.videos
             currentPage = result.currentPage
@@ -63,7 +65,8 @@ final class VideoListViewModel {
                 sort: sortOption.rawValue,
                 order: sortAscending ? "asc" : "desc",
                 watch: watchFilter.queryValue,
-                channel: nil
+                channel: nil,
+                vidType: vidTypeFilter.queryValue
             )
             let existingIds = Set(videos.map(\.youtubeId))
             videos.append(contentsOf: result.videos.filter { !existingIds.contains($0.youtubeId) })
@@ -82,6 +85,12 @@ final class VideoListViewModel {
 
     func onSortOrFilterChanged() async {
         await loadVideos()
+    }
+
+    func setVidType(_ type: VidTypeFilter) {
+        guard type != vidTypeFilter else { return }
+        vidTypeFilter = type
+        Task { await loadVideos() }
     }
 
     func logout() {

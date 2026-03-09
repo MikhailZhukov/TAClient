@@ -195,7 +195,7 @@ extension DataLayerSuite {
         MockResponse.setUp(json: ["data": [], "paginate": nil] as [String: Any?])
 
         let _: VideoListResponseDTO = try await client.request(
-            endpoint: .videoList(page: 2, sort: "views", order: "asc", watch: nil, channel: nil)
+            endpoint: .videoList(page: 2, sort: "views", order: "asc", watch: nil, channel: nil, vidType: nil)
         )
 
         guard let url = MockURLProtocol.lastRequest?.url else {

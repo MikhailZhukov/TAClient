@@ -13,9 +13,9 @@ final class VideoRepositoryImpl: VideoRepositoryProtocol {
         authState.serverURL ?? ""
     }
 
-    func getVideos(page: Int, sort: String, order: String, watch: String?, channel: String?) async throws -> VideoListResult {
+    func getVideos(page: Int, sort: String, order: String, watch: String?, channel: String?, vidType: String?) async throws -> VideoListResult {
         let response: VideoListResponseDTO = try await apiClient.request(
-            endpoint: .videoList(page: page, sort: sort, order: order, watch: watch, channel: channel)
+            endpoint: .videoList(page: page, sort: sort, order: order, watch: watch, channel: channel, vidType: vidType)
         )
 
         let videos = response.data?.compactMap { VideoMapper.map($0, serverURL: serverURL) } ?? []

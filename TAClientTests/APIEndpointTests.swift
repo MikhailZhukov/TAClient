@@ -20,7 +20,7 @@ extension DataLayerSuite {
     }
 
     @Test func videoList_path() {
-        #expect(APIEndpoint.videoList(page: 1, sort: "date", order: "desc", watch: nil, channel: nil).path == "/api/video/")
+        #expect(APIEndpoint.videoList(page: 1, sort: "date", order: "desc", watch: nil, channel: nil, vidType: nil).path == "/api/video/")
     }
 
     @Test func videoDetail_path() {
@@ -88,7 +88,7 @@ extension DataLayerSuite {
     @Test func get_endpoints() {
         #expect(APIEndpoint.token.method == .get)
         #expect(APIEndpoint.ping.method == .get)
-        #expect(APIEndpoint.videoList(page: 1, sort: "date", order: "desc", watch: nil, channel: nil).method == .get)
+        #expect(APIEndpoint.videoList(page: 1, sort: "date", order: "desc", watch: nil, channel: nil, vidType: nil).method == .get)
         #expect(APIEndpoint.videoDetail(id: "x").method == .get)
         #expect(APIEndpoint.videoComments(id: "x").method == .get)
         #expect(APIEndpoint.search(query: "q", page: 1).method == .get)
@@ -116,7 +116,7 @@ extension DataLayerSuite {
     // MARK: - Query Items
 
     @Test func videoList_queryItems_allParams() {
-        let endpoint = APIEndpoint.videoList(page: 2, sort: "views", order: "asc", watch: "unwatched", channel: "UCxyz")
+        let endpoint = APIEndpoint.videoList(page: 2, sort: "views", order: "asc", watch: "unwatched", channel: "UCxyz", vidType: nil)
         let items = endpoint.queryItems!
         #expect(items.contains(URLQueryItem(name: "page", value: "2")))
         #expect(items.contains(URLQueryItem(name: "sort", value: "views")))
@@ -126,7 +126,7 @@ extension DataLayerSuite {
     }
 
     @Test func videoList_queryItems_nilOptionals() {
-        let endpoint = APIEndpoint.videoList(page: 1, sort: "date", order: "desc", watch: nil, channel: nil)
+        let endpoint = APIEndpoint.videoList(page: 1, sort: "date", order: "desc", watch: nil, channel: nil, vidType: nil)
         let items = endpoint.queryItems!
         #expect(items.count == 3)
         #expect(!items.contains { $0.name == "watch" })
@@ -134,7 +134,7 @@ extension DataLayerSuite {
     }
 
     @Test func videoList_queryItems_emptyOptionals() {
-        let endpoint = APIEndpoint.videoList(page: 1, sort: "date", order: "desc", watch: "", channel: "")
+        let endpoint = APIEndpoint.videoList(page: 1, sort: "date", order: "desc", watch: "", channel: "", vidType: nil)
         let items = endpoint.queryItems!
         #expect(items.count == 3)
         #expect(!items.contains { $0.name == "watch" })

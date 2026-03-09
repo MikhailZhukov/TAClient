@@ -41,7 +41,7 @@ extension DataLayerSuite {
             ]
         ] as [String: Any])
 
-        let result = try await repo.getVideos(page: 1, sort: "date", order: "desc", watch: nil, channel: nil)
+        let result = try await repo.getVideos(page: 1, sort: "date", order: "desc", watch: nil, channel: nil, vidType: nil)
 
         #expect(result.currentPage == 1)
         #expect(result.lastPage == 3)
@@ -61,7 +61,7 @@ extension DataLayerSuite {
             "paginate": ["current_page": 1, "last_page": 1, "total_hits": 0]
         ] as [String: Any])
 
-        let result = try await repo.getVideos(page: 1, sort: "date", order: "desc", watch: nil, channel: nil)
+        let result = try await repo.getVideos(page: 1, sort: "date", order: "desc", watch: nil, channel: nil, vidType: nil)
         #expect(result.videos.isEmpty)
         authState.handleUnauthorized()
     }
@@ -71,8 +71,22 @@ extension DataLayerSuite {
         MockResponse.setUp(statusCode: 401, json: ["detail": "Invalid token"])
 
         await #expect(throws: AppError.self) {
-            _ = try await repo.getVideos(page: 1, sort: "date", order: "desc", watch: nil, channel: nil)
+            _ = try await repo.getVideos(page: 1, sort: "date", order: "desc", watch: nil, channel: nil, vidType: nil)
         }
+        authState.handleUnauthorized()
+    }
+
+    @Test func getVideos_withVidType_sendsQueryParam() async throws {
+        let (repo, authState) = makeRepo()
+        MockResponse.setUp(json: [
+            "data": [] as [Any],
+            "paginate": ["current_page": 1, "last_page": 1, "total_hits": 0]
+        ] as [String: Any])
+
+        _ = try await repo.getVideos(page: 1, sort: "date", order: "desc", watch: nil, channel: nil, vidType: "shorts")
+
+        let url = MockURLProtocol.lastRequest?.url?.absoluteString ?? ""
+        #expect(url.contains("type=shorts"))
         authState.handleUnauthorized()
     }
 

@@ -18,7 +18,7 @@ struct VideoListViewModelTests {
 
     @Test func loadVideos_success_populatesVideos() async {
         let repo = MockVideoRepository()
-        repo.getVideosHandler = { _, _, _, _, _ in
+        repo.getVideosHandler = { _, _, _, _, _, _ in
             TestData.videoListResult(count: 3, currentPage: 1, lastPage: 2)
         }
         let (vm, _) = makeSUT(videoRepo: repo)
@@ -32,7 +32,7 @@ struct VideoListViewModelTests {
 
     @Test func loadVideos_unauthorized_routerHandles() async {
         let repo = MockVideoRepository()
-        repo.getVideosHandler = { _, _, _, _, _ in throw AppError.unauthorized }
+        repo.getVideosHandler = { _, _, _, _, _, _ in throw AppError.unauthorized }
         let (vm, router) = makeSUT(videoRepo: repo)
 
         await vm.loadVideos()
@@ -42,7 +42,7 @@ struct VideoListViewModelTests {
 
     @Test func loadVideos_error_setsErrorMessage() async {
         let repo = MockVideoRepository()
-        repo.getVideosHandler = { _, _, _, _, _ in
+        repo.getVideosHandler = { _, _, _, _, _, _ in
             throw AppError.serverError(statusCode: 500, message: "Internal Server Error")
         }
         let (vm, _) = makeSUT(videoRepo: repo)
@@ -56,7 +56,7 @@ struct VideoListViewModelTests {
     @Test func loadMoreIfNeeded_atLastPage_doesNotCall() async {
         var callCount = 0
         let repo = MockVideoRepository()
-        repo.getVideosHandler = { page, _, _, _, _ in
+        repo.getVideosHandler = { page, _, _, _, _, _ in
             callCount += 1
             return TestData.videoListResult(count: 3, currentPage: 1, lastPage: 1)
         }
@@ -72,7 +72,7 @@ struct VideoListViewModelTests {
 
     @Test func loadMoreIfNeeded_success_appendsVideos() async {
         let repo = MockVideoRepository()
-        repo.getVideosHandler = { page, _, _, _, _ in
+        repo.getVideosHandler = { page, _, _, _, _, _ in
             if page == 1 {
                 return TestData.videoListResult(count: 3, currentPage: 1, lastPage: 2)
             } else {
@@ -90,7 +90,7 @@ struct VideoListViewModelTests {
 
     @Test func refresh_incrementsRefreshCount() async {
         let repo = MockVideoRepository()
-        repo.getVideosHandler = { _, _, _, _, _ in
+        repo.getVideosHandler = { _, _, _, _, _, _ in
             TestData.videoListResult(count: 1)
         }
         let (vm, _) = makeSUT(videoRepo: repo)
@@ -112,7 +112,7 @@ struct VideoListViewModelTests {
         var capturedWatch: String?
 
         let repo = MockVideoRepository()
-        repo.getVideosHandler = { _, sort, order, watch, _ in
+        repo.getVideosHandler = { _, sort, order, watch, _, _ in
             capturedSort = sort
             capturedOrder = order
             capturedWatch = watch

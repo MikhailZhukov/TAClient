@@ -22,7 +22,7 @@ final class MockAuthRepository: AuthRepositoryProtocol {
 }
 
 final class MockVideoRepository: VideoRepositoryProtocol {
-    var getVideosHandler: (Int, String, String, String?, String?) async throws -> VideoListResult = { _, _, _, _, _ in
+    var getVideosHandler: (Int, String, String, String?, String?, String?) async throws -> VideoListResult = { _, _, _, _, _, _ in
         VideoListResult(videos: [], currentPage: 1, lastPage: 1, totalHits: 0)
     }
     var getVideoHandler: (String) async throws -> Video = { _ in TestData.video() }
@@ -32,8 +32,8 @@ final class MockVideoRepository: VideoRepositoryProtocol {
     var ignoreVideoHandler: (String) async throws -> Void = { _ in }
     var getCommentsHandler: (String) async throws -> [Comment] = { _ in [] }
 
-    func getVideos(page: Int, sort: String, order: String, watch: String?, channel: String?) async throws -> VideoListResult {
-        try await getVideosHandler(page, sort, order, watch, channel)
+    func getVideos(page: Int, sort: String, order: String, watch: String?, channel: String?, vidType: String?) async throws -> VideoListResult {
+        try await getVideosHandler(page, sort, order, watch, channel, vidType)
     }
 
     func getVideo(id: String) async throws -> Video {

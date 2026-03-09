@@ -13,7 +13,7 @@ enum APIEndpoint {
     case ping
 
     // Videos
-    case videoList(page: Int, sort: String, order: String, watch: String?, channel: String?)
+    case videoList(page: Int, sort: String, order: String, watch: String?, channel: String?, vidType: String?)
     case videoDetail(id: String)
     case videoProgress(id: String)
     case deleteVideoProgress(id: String)
@@ -92,7 +92,7 @@ enum APIEndpoint {
 
     var queryItems: [URLQueryItem]? {
         switch self {
-        case .videoList(let page, let sort, let order, let watch, let channel):
+        case .videoList(let page, let sort, let order, let watch, let channel, let vidType):
             var items = [
                 URLQueryItem(name: "page", value: "\(page)"),
                 URLQueryItem(name: "sort", value: sort),
@@ -103,6 +103,9 @@ enum APIEndpoint {
             }
             if let channel, !channel.isEmpty {
                 items.append(URLQueryItem(name: "channel", value: channel))
+            }
+            if let vidType, !vidType.isEmpty {
+                items.append(URLQueryItem(name: "type", value: vidType))
             }
             return items
         case .downloadList(let page, let filter):

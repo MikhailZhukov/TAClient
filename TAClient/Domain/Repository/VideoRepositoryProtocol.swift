@@ -8,7 +8,7 @@ struct VideoListResult {
 }
 
 protocol VideoRepositoryProtocol {
-    func getVideos(page: Int, sort: String, order: String, watch: String?, channel: String?) async throws -> VideoListResult
+    func getVideos(page: Int, sort: String, order: String, watch: String?, channel: String?, vidType: String?) async throws -> VideoListResult
     func getVideo(id: String) async throws -> Video
     func updateProgress(videoId: String, position: Double) async throws
     func deleteProgress(videoId: String) async throws

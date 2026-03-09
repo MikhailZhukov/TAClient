@@ -45,6 +45,31 @@ enum WatchFilter: String, CaseIterable {
     }
 }
 
+enum VidTypeFilter: String, CaseIterable {
+    case all
+    case videos
+    case shorts
+    case streams
+
+    var label: String {
+        switch self {
+        case .all: return String(localized: "vid_type_all")
+        case .videos: return String(localized: "vid_type_videos")
+        case .shorts: return String(localized: "vid_type_shorts")
+        case .streams: return String(localized: "vid_type_streams")
+        }
+    }
+
+    var queryValue: String? {
+        switch self {
+        case .all: return nil
+        case .videos: return "videos"
+        case .shorts: return "shorts"
+        case .streams: return "streams"
+        }
+    }
+}
+
 struct SortFilterMenu: View {
     @Binding var sortOption: SortOption
     @Binding var sortAscending: Bool

@@ -31,7 +31,7 @@ final class ChannelDetailViewModel {
         do {
             async let channelTask = channelRepository.getChannel(id: channelId)
             async let videosTask = videoRepository.getVideos(
-                page: 1, sort: "published", order: "desc", watch: nil, channel: channelId
+                page: 1, sort: "published", order: "desc", watch: nil, channel: channelId, vidType: nil
             )
 
             let (loadedChannel, videoResult) = try await (channelTask, videosTask)
@@ -53,7 +53,7 @@ final class ChannelDetailViewModel {
         let nextPage = currentPage + 1
         do {
             let result = try await videoRepository.getVideos(
-                page: nextPage, sort: "published", order: "desc", watch: nil, channel: channelId
+                page: nextPage, sort: "published", order: "desc", watch: nil, channel: channelId, vidType: nil
             )
             let existingIds = Set(videos.map(\.youtubeId))
             videos.append(contentsOf: result.videos.filter { !existingIds.contains($0.youtubeId) })
