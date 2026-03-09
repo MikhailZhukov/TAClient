@@ -291,6 +291,22 @@ final class VideoDetailViewModel {
         }
     }
 
+    func toggleWatched() async {
+        guard var updatedVideo = video else { return }
+        let newValue = !updatedVideo.watched
+        updatedVideo.watched = newValue
+        video = updatedVideo
+
+        do {
+            try await videoRepository.setWatched(videoId: videoId, isWatched: newValue)
+            router.markWatchedChanged(videoId, isWatched: newValue)
+        } catch {
+            updatedVideo.watched = !newValue
+            video = updatedVideo
+            router.handleError(error, errorMessage: &errorMessage)
+        }
+    }
+
     func deleteVideo() async {
         do {
             try await videoRepository.deleteVideo(id: videoId)

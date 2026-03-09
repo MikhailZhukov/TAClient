@@ -15,4 +15,5 @@ protocol VideoRepositoryProtocol {
     func deleteVideo(id: String) async throws
     func ignoreVideo(id: String) async throws
     func getComments(videoId: String) async throws -> [Comment]
+    func setWatched(videoId: String, isWatched: Bool) async throws
 }

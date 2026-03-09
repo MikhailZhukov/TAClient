@@ -33,6 +33,9 @@ enum APIEndpoint {
     case notifications
     case killTask(id: String)
 
+    // Watched
+    case setWatched
+
     // Channels
     case channelDetail(id: String)
     case updateChannel(id: String)
@@ -75,6 +78,8 @@ enum APIEndpoint {
             return "/api/task/by-id/\(id)/"
         case .search:
             return "/api/search/"
+        case .setWatched:
+            return "/api/watched/"
         case .channelDetail(let id):
             return "/api/channel/\(id)/"
         case .updateChannel(let id):
@@ -84,7 +89,7 @@ enum APIEndpoint {
 
     var method: HTTPMethod {
         switch self {
-        case .login, .videoProgress, .ignoreVideo, .updateDownloadStatus, .addToDownloadQueue, .startDownload, .killTask, .updateChannel:
+        case .login, .videoProgress, .ignoreVideo, .updateDownloadStatus, .addToDownloadQueue, .startDownload, .killTask, .setWatched, .updateChannel:
             return .post
         case .deleteVideo, .deleteVideoProgress, .deleteDownload:
             return .delete

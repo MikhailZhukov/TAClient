@@ -83,6 +83,14 @@ extension DataLayerSuite {
         #expect(APIEndpoint.channelDetail(id: "UCxyz").path == "/api/channel/UCxyz/")
     }
 
+    @Test func setWatched_path() {
+        #expect(APIEndpoint.setWatched.path == "/api/watched/")
+    }
+
+    @Test func setWatched_method() {
+        #expect(APIEndpoint.setWatched.method == .post)
+    }
+
     @Test func updateChannel_path() {
         #expect(APIEndpoint.updateChannel(id: "UCxyz").path == "/api/channel/UCxyz/")
     }

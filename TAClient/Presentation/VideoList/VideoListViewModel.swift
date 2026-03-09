@@ -13,6 +13,9 @@ final class VideoListViewModel {
     var vidTypeFilter: VidTypeFilter = .all
     private(set) var refreshCount = 0
 
+    var isSelecting = false
+    var selectedVideoIds: Set<String> = []
+
     private var currentPage = 1
     private var lastPage = 1
     private var canLoadMore: Bool { currentPage < lastPage && !isLoadingMore }
@@ -98,9 +101,124 @@ final class VideoListViewModel {
         router.handleUnauthorized()
     }
 
+    func toggleWatched(videoId: String) async {
+        guard let index = videos.firstIndex(where: { $0.youtubeId == videoId }) else { return }
+        let oldValue = videos[index].watched
+        videos[index].watched = !oldValue
+
+        do {
+            try await videoRepository.setWatched(videoId: videoId, isWatched: !oldValue)
+            removeIfFilterMismatch(videoId: videoId)
+        } catch {
+            if index < videos.count && videos[index].youtubeId == videoId {
+                videos[index].watched = oldValue
+            }
+            router.handleError(error, errorMessage: &errorMessage)
+        }
+    }
+
+    func applyWatchedChanges() {
+        guard !router.watchedChanges.isEmpty else { return }
+        for (videoId, isWatched) in router.watchedChanges {
+            if let index = videos.firstIndex(where: { $0.youtubeId == videoId }) {
+                videos[index].watched = isWatched
+                removeIfFilterMismatch(videoId: videoId)
+            }
+        }
+    }
+
+    private func removeIfFilterMismatch(videoId: String) {
+        guard let index = videos.firstIndex(where: { $0.youtubeId == videoId }) else { return }
+        let watched = videos[index].watched
+        let shouldRemove: Bool
+        switch watchFilter {
+        case .unwatched: shouldRemove = watched
+        case .watched: shouldRemove = !watched
+        case .continue: shouldRemove = watched
+        case .all: shouldRemove = false
+        }
+        if shouldRemove {
+            videos.remove(at: index)
+        }
+    }
+
     func removeDeletedVideos() {
         guard !router.deletedVideoIds.isEmpty else { return }
         videos.removeAll { router.deletedVideoIds.contains($0.youtubeId) }
+    }
+
+    func enterSelectionMode(videoId: String) {
+        isSelecting = true
+        selectedVideoIds = [videoId]
+    }
+
+    func toggleSelection(videoId: String) {
+        if selectedVideoIds.contains(videoId) {
+            selectedVideoIds.remove(videoId)
+            if selectedVideoIds.isEmpty {
+                isSelecting = false
+            }
+        } else {
+            selectedVideoIds.insert(videoId)
+        }
+    }
+
+    func cancelSelection() {
+        isSelecting = false
+        selectedVideoIds = []
+    }
+
+    func selectAll() {
+        selectedVideoIds = Set(videos.map(\.youtubeId))
+    }
+
+    var showMarkWatched: Bool {
+        switch watchFilter {
+        case .all, .unwatched, .continue: return true
+        case .watched: return false
+        }
+    }
+
+    var showMarkUnwatched: Bool {
+        switch watchFilter {
+        case .all, .watched: return true
+        case .unwatched, .continue: return false
+        }
+    }
+
+    func batchSetWatched(_ isWatched: Bool) async {
+        let ids = Array(selectedVideoIds)
+        cancelSelection()
+
+        for videoId in ids {
+            guard let index = videos.firstIndex(where: { $0.youtubeId == videoId }) else { continue }
+            videos[index].watched = isWatched
+
+            do {
+                try await videoRepository.setWatched(videoId: videoId, isWatched: isWatched)
+                removeIfFilterMismatch(videoId: videoId)
+            } catch {
+                if let idx = videos.firstIndex(where: { $0.youtubeId == videoId }) {
+                    videos[idx].watched = !isWatched
+                }
+                router.handleError(error, errorMessage: &errorMessage)
+            }
+        }
+    }
+
+    func batchDelete() async {
+        let ids = Array(selectedVideoIds)
+        cancelSelection()
+
+        for videoId in ids {
+            do {
+                try await videoRepository.deleteVideo(id: videoId)
+                videos.removeAll { $0.youtubeId == videoId }
+                router.markVideoDeleted(videoId)
+            } catch {
+                router.handleError(error, errorMessage: &errorMessage)
+            }
+        }
     }
 
     func navigateToVideo(_ videoId: String) {

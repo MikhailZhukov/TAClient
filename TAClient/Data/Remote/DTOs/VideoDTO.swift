@@ -97,3 +97,13 @@ struct VideoProgressDTO: Encodable {
 struct IgnoreVideoDTO: Encodable {
     let status: String
 }
+
+struct WatchedDTO: Encodable {
+    let id: String
+    let isWatched: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case isWatched = "is_watched"
+    }
+}

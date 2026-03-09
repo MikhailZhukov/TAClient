@@ -17,7 +17,7 @@ struct Video: Identifiable, Hashable {
     let mediaUrl: String
     let duration: Int
     let durationStr: String
-    let watched: Bool
+    var watched: Bool
     let progress: Double
     let position: Double
     let viewCount: Int

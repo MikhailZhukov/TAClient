@@ -30,6 +30,16 @@ struct VideoDetailView: View {
                         }
                         .accessibilityLabel(String(localized: "video_detail_pin_player"))
                     }
+                    if let video = viewModel.video {
+                        Button {
+                            Task { await viewModel.toggleWatched() }
+                        } label: {
+                            Image(systemName: video.watched ? "eye.fill" : "eye")
+                        }
+                        .accessibilityLabel(video.watched
+                            ? String(localized: "video_mark_unwatched")
+                            : String(localized: "video_mark_watched"))
+                    }
                     Button {
                         viewModel.showDeleteDialog = true
                     } label: {

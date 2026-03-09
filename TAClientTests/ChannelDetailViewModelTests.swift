@@ -132,6 +132,27 @@ struct ChannelDetailViewModelTests {
         #expect(vm.errorMessage != nil)
     }
 
+    @Test func batchSetWatched_updatesVideosAndNotifiesRouter() async {
+        let videoRepo = MockVideoRepository()
+        videoRepo.getVideosHandler = { _, _, _, _, _, _ in
+            TestData.videoListResult(count: 3, currentPage: 1, lastPage: 1)
+        }
+        let (vm, router) = makeSUT(videoRepo: videoRepo)
+
+        await vm.loadChannel()
+        vm.enterSelectionMode(videoId: "video-0")
+        vm.toggleSelection(videoId: "video-1")
+
+        await vm.batchSetWatched(true)
+
+        #expect(vm.isSelecting == false)
+        #expect(vm.videos[0].watched == true)
+        #expect(vm.videos[1].watched == true)
+        #expect(vm.videos[2].watched == false)
+        #expect(router.watchedChanges["video-0"] == true)
+        #expect(router.watchedChanges["video-1"] == true)
+    }
+
     @Test func navigation_appendsRoute() {
         let (vm, router) = makeSUT()
         vm.navigateToVideo("vid-1")

@@ -3,6 +3,7 @@ import SwiftUI
 struct VideoListView: View {
     @State var viewModel: VideoListViewModel
     @State private var showLogoutConfirmation = false
+    @State private var showDeleteConfirmation = false
 
     var body: some View {
         @Bindable var viewModel = viewModel
@@ -29,8 +30,19 @@ struct VideoListView: View {
                             onChannelTap: { channelId in
                                 viewModel.navigateToChannel(channelId)
                             },
+                            onToggleWatched: { videoId in
+                                Task { await viewModel.toggleWatched(videoId: videoId) }
+                            },
                             onNearEnd: {
                                 Task { await viewModel.loadMoreIfNeeded() }
+                            },
+                            isSelecting: viewModel.isSelecting,
+                            selectedIds: viewModel.selectedVideoIds,
+                            onEnterSelection: { videoId in
+                                viewModel.enterSelectionMode(videoId: videoId)
+                            },
+                            onToggleSelection: { videoId in
+                                viewModel.toggleSelection(videoId: videoId)
                             }
                         )
                         .id(viewModel.refreshCount)
@@ -50,62 +62,108 @@ struct VideoListView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Menu {
-                    ForEach(VidTypeFilter.allCases, id: \.self) { type in
-                        Button {
-                            viewModel.setVidType(type)
-                        } label: {
-                            if viewModel.vidTypeFilter == type {
-                                Label(type.label, systemImage: "checkmark")
-                            } else {
-                                Text(type.label)
+            if viewModel.isSelecting {
+                ToolbarItem(placement: .principal) {
+                    Text(String(localized: "selection_count \(viewModel.selectedVideoIds.count)"))
+                        .font(.headline)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    HStack(spacing: 16) {
+                        if viewModel.showMarkWatched {
+                            Button {
+                                Task { await viewModel.batchSetWatched(true) }
+                            } label: {
+                                Image(systemName: "eye")
                             }
+                            .accessibilityLabel(String(localized: "video_mark_watched"))
+                        }
+
+                        if viewModel.showMarkUnwatched {
+                            Button {
+                                Task { await viewModel.batchSetWatched(false) }
+                            } label: {
+                                Image(systemName: "eye.slash")
+                            }
+                            .accessibilityLabel(String(localized: "video_mark_unwatched"))
+                        }
+
+                        Button {
+                            showDeleteConfirmation = true
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .accessibilityLabel(String(localized: "selection_delete"))
+
+                        Button {
+                            viewModel.selectAll()
+                        } label: {
+                            Image(systemName: "checkmark.circle")
+                        }
+                        .accessibilityLabel(String(localized: "selection_select_all"))
+
+                        Button(String(localized: "cancel")) {
+                            viewModel.cancelSelection()
                         }
                     }
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(viewModel.vidTypeFilter == .all
-                             ? String(localized: "video_list_title")
-                             : viewModel.vidTypeFilter.label)
-                            .font(.title2)
-                            .fontWeight(.bold)
-                        Image(systemName: "chevron.down")
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                    }
-                    .fixedSize()
                 }
-                .accessibilityLabel(String(localized: "vid_type_section_title"))
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                HStack(spacing: 16) {
-                    SortFilterMenu(
-                        sortOption: $viewModel.sortOption,
-                        sortAscending: $viewModel.sortAscending,
-                        watchFilter: $viewModel.watchFilter
-                    )
-
-                    Button {
-                        viewModel.navigateToDownloadQueue()
+            } else {
+                ToolbarItem(placement: .topBarLeading) {
+                    Menu {
+                        ForEach(VidTypeFilter.allCases, id: \.self) { type in
+                            Button {
+                                viewModel.setVidType(type)
+                            } label: {
+                                if viewModel.vidTypeFilter == type {
+                                    Label(type.label, systemImage: "checkmark")
+                                } else {
+                                    Text(type.label)
+                                }
+                            }
+                        }
                     } label: {
-                        Image(systemName: "arrow.down.circle")
+                        HStack(spacing: 4) {
+                            Text(viewModel.vidTypeFilter == .all
+                                 ? String(localized: "video_list_title")
+                                 : viewModel.vidTypeFilter.label)
+                                .font(.title2)
+                                .fontWeight(.bold)
+                            Image(systemName: "chevron.down")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                        }
+                        .fixedSize()
                     }
-                    .accessibilityLabel(String(localized: "download_queue_title"))
+                    .accessibilityLabel(String(localized: "vid_type_section_title"))
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    HStack(spacing: 16) {
+                        SortFilterMenu(
+                            sortOption: $viewModel.sortOption,
+                            sortAscending: $viewModel.sortAscending,
+                            watchFilter: $viewModel.watchFilter
+                        )
 
-                    Button {
-                        viewModel.navigateToSearch()
-                    } label: {
-                        Image(systemName: "magnifyingglass")
-                    }
-                    .accessibilityLabel(String(localized: "search_hint"))
+                        Button {
+                            viewModel.navigateToDownloadQueue()
+                        } label: {
+                            Image(systemName: "arrow.down.circle")
+                        }
+                        .accessibilityLabel(String(localized: "download_queue_title"))
 
-                    Button {
-                        showLogoutConfirmation = true
-                    } label: {
-                        Image(systemName: "rectangle.portrait.and.arrow.right")
+                        Button {
+                            viewModel.navigateToSearch()
+                        } label: {
+                            Image(systemName: "magnifyingglass")
+                        }
+                        .accessibilityLabel(String(localized: "search_hint"))
+
+                        Button {
+                            showLogoutConfirmation = true
+                        } label: {
+                            Image(systemName: "rectangle.portrait.and.arrow.right")
+                        }
+                        .accessibilityLabel(String(localized: "video_list_logout"))
                     }
-                    .accessibilityLabel(String(localized: "video_list_logout"))
                 }
             }
         }
@@ -126,6 +184,9 @@ struct VideoListView: View {
         .onChange(of: viewModel.router.deletedVideoIds) {
             viewModel.removeDeletedVideos()
         }
+        .onChange(of: viewModel.router.watchedChanges) {
+            viewModel.applyWatchedChanges()
+        }
         .confirmationDialog(
             String(localized: "video_list_logout"),
             isPresented: $showLogoutConfirmation,
@@ -133,6 +194,16 @@ struct VideoListView: View {
         ) {
             Button(String(localized: "video_list_logout"), role: .destructive) {
                 viewModel.logout()
+            }
+            Button(String(localized: "cancel"), role: .cancel) {}
+        }
+        .confirmationDialog(
+            String(localized: "selection_delete_confirm \(viewModel.selectedVideoIds.count)"),
+            isPresented: $showDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(String(localized: "video_detail_delete"), role: .destructive) {
+                Task { await viewModel.batchDelete() }
             }
             Button(String(localized: "cancel"), role: .cancel) {}
         }

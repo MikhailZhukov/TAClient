@@ -31,6 +31,7 @@ final class MockVideoRepository: VideoRepositoryProtocol {
     var deleteVideoHandler: (String) async throws -> Void = { _ in }
     var ignoreVideoHandler: (String) async throws -> Void = { _ in }
     var getCommentsHandler: (String) async throws -> [Comment] = { _ in [] }
+    var setWatchedHandler: (String, Bool) async throws -> Void = { _, _ in }
 
     func getVideos(page: Int, sort: String, order: String, watch: String?, channel: String?, vidType: String?) async throws -> VideoListResult {
         try await getVideosHandler(page, sort, order, watch, channel, vidType)
@@ -58,6 +59,10 @@ final class MockVideoRepository: VideoRepositoryProtocol {
 
     func getComments(videoId: String) async throws -> [Comment] {
         try await getCommentsHandler(videoId)
+    }
+
+    func setWatched(videoId: String, isWatched: Bool) async throws {
+        try await setWatchedHandler(videoId, isWatched)
     }
 }
 

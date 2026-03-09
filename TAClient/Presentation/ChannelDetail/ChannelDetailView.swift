@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ChannelDetailView: View {
     @Bindable var viewModel: ChannelDetailViewModel
+    @State private var showDeleteConfirmation = false
 
     var body: some View {
         Group {
@@ -21,8 +22,19 @@ struct ChannelDetailView: View {
                             onVideoTap: { videoId in
                                 viewModel.navigateToVideo(videoId)
                             },
+                            onToggleWatched: { videoId in
+                                Task { await viewModel.toggleWatched(videoId: videoId) }
+                            },
                             onNearEnd: {
                                 Task { await viewModel.loadMoreVideos() }
+                            },
+                            isSelecting: viewModel.isSelecting,
+                            selectedIds: viewModel.selectedVideoIds,
+                            onEnterSelection: { videoId in
+                                viewModel.enterSelectionMode(videoId: videoId)
+                            },
+                            onToggleSelection: { videoId in
+                                viewModel.toggleSelection(videoId: videoId)
                             }
                         )
 
@@ -38,11 +50,67 @@ struct ChannelDetailView: View {
         }
         .navigationTitle(viewModel.channel?.channelName ?? "")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if viewModel.isSelecting {
+                ToolbarItem(placement: .principal) {
+                    Text(String(localized: "selection_count \(viewModel.selectedVideoIds.count)"))
+                        .font(.headline)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    HStack(spacing: 16) {
+                        Button {
+                            Task { await viewModel.batchSetWatched(true) }
+                        } label: {
+                            Image(systemName: "eye")
+                        }
+                        .accessibilityLabel(String(localized: "video_mark_watched"))
+
+                        Button {
+                            Task { await viewModel.batchSetWatched(false) }
+                        } label: {
+                            Image(systemName: "eye.slash")
+                        }
+                        .accessibilityLabel(String(localized: "video_mark_unwatched"))
+
+                        Button {
+                            showDeleteConfirmation = true
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .accessibilityLabel(String(localized: "selection_delete"))
+
+                        Button {
+                            viewModel.selectAll()
+                        } label: {
+                            Image(systemName: "checkmark.circle")
+                        }
+                        .accessibilityLabel(String(localized: "selection_select_all"))
+
+                        Button(String(localized: "cancel")) {
+                            viewModel.cancelSelection()
+                        }
+                    }
+                }
+            }
+        }
+        .confirmationDialog(
+            String(localized: "selection_delete_confirm \(viewModel.selectedVideoIds.count)"),
+            isPresented: $showDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(String(localized: "video_detail_delete"), role: .destructive) {
+                Task { await viewModel.batchDelete() }
+            }
+            Button(String(localized: "cancel"), role: .cancel) {}
+        }
         .task {
             await viewModel.loadChannel()
         }
         .onChange(of: viewModel.router.deletedVideoIds) {
             viewModel.removeDeletedVideos()
+        }
+        .onChange(of: viewModel.router.watchedChanges) {
+            viewModel.applyWatchedChanges()
         }
     }
 

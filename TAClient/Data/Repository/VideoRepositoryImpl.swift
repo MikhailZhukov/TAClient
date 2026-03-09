@@ -61,4 +61,11 @@ final class VideoRepositoryImpl: VideoRepositoryProtocol {
         let dtos: [CommentDTO] = try await apiClient.request(endpoint: .videoComments(id: videoId))
         return dtos.compactMap { CommentMapper.map($0, serverURL: serverURL) }
     }
+
+    func setWatched(videoId: String, isWatched: Bool) async throws {
+        try await apiClient.requestVoid(
+            endpoint: .setWatched,
+            body: WatchedDTO(id: videoId, isWatched: isWatched)
+        )
+    }
 }

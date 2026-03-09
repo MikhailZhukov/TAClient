@@ -11,6 +11,7 @@ final class AppRouter {
     var path = NavigationPath()
     var appState: AppState
     private(set) var deletedVideoIds: Set<String> = []
+    private(set) var watchedChanges: [String: Bool] = [:]
 
     private let authState: AuthState
 
@@ -32,16 +33,22 @@ final class AppRouter {
         deletedVideoIds.insert(videoId)
     }
 
+    func markWatchedChanged(_ videoId: String, isWatched: Bool) {
+        watchedChanges[videoId] = isWatched
+    }
+
     func handleUnauthorized() {
         authState.handleUnauthorized()
         path = NavigationPath()
         deletedVideoIds.removeAll()
+        watchedChanges.removeAll()
         appState = .login
     }
 
     func onLoginSuccess() {
         path = NavigationPath()
         deletedVideoIds.removeAll()
+        watchedChanges.removeAll()
         appState = .authenticated
     }
 

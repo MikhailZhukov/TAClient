@@ -95,6 +95,41 @@ struct VideoDetailViewModelTests {
         #expect(capturedPosition == 42.5)
     }
 
+    @Test func toggleWatched_success_updatesVideo() async {
+        let repo = MockVideoRepository()
+        repo.getVideoHandler = { _ in TestData.video(watched: false) }
+        var capturedIsWatched: Bool?
+        repo.setWatchedHandler = { _, isWatched in
+            capturedIsWatched = isWatched
+        }
+        let (vm, _) = makeSUT(videoRepo: repo)
+
+        await vm.loadVideo()
+        #expect(vm.video?.watched == false)
+
+        await vm.toggleWatched()
+
+        #expect(vm.video?.watched == true)
+        #expect(capturedIsWatched == true)
+    }
+
+    @Test func toggleWatched_error_revertsState() async {
+        let repo = MockVideoRepository()
+        repo.getVideoHandler = { _ in TestData.video(watched: true) }
+        repo.setWatchedHandler = { _, _ in
+            throw AppError.serverError(statusCode: 500, message: "Error")
+        }
+        let (vm, _) = makeSUT(videoRepo: repo)
+
+        await vm.loadVideo()
+        #expect(vm.video?.watched == true)
+
+        await vm.toggleWatched()
+
+        #expect(vm.video?.watched == true)
+        #expect(vm.errorMessage != nil)
+    }
+
     @Test func startPosition_returnsVideoPosition() async {
         let repo = MockVideoRepository()
         repo.getVideoHandler = { _ in TestData.video(position: 123.0) }

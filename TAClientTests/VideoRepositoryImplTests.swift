@@ -90,6 +90,19 @@ extension DataLayerSuite {
         authState.handleUnauthorized()
     }
 
+    // MARK: - setWatched
+
+    @Test func setWatched_sendsPost() async throws {
+        let (repo, authState) = makeRepo()
+        MockResponse.setUp(statusCode: 200, data: Data())
+
+        try await repo.setWatched(videoId: "vid1", isWatched: true)
+
+        #expect(MockURLProtocol.lastRequest?.httpMethod == "POST")
+        #expect(MockURLProtocol.lastRequest?.url?.path.contains("/api/watched") == true)
+        authState.handleUnauthorized()
+    }
+
     // MARK: - getVideo
 
     @Test func getVideo_success_mapsAllFields() async throws {
