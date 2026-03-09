@@ -97,6 +97,41 @@ struct ChannelDetailViewModelTests {
         #expect(vm.videos.count == 5)
     }
 
+    @Test func toggleSubscription_success_updatesChannel() async {
+        let channelRepo = MockChannelRepository()
+        channelRepo.getChannelHandler = { _ in TestData.channel() }
+        var capturedSubscribed: Bool?
+        channelRepo.setSubscribedHandler = { _, subscribed in
+            capturedSubscribed = subscribed
+        }
+        let (vm, _) = makeSUT(channelRepo: channelRepo)
+
+        await vm.loadChannel()
+        #expect(vm.channel?.channelSubscribed == true)
+
+        await vm.toggleSubscription()
+
+        #expect(vm.channel?.channelSubscribed == false)
+        #expect(capturedSubscribed == false)
+    }
+
+    @Test func toggleSubscription_error_revertsState() async {
+        let channelRepo = MockChannelRepository()
+        channelRepo.getChannelHandler = { _ in TestData.channel() }
+        channelRepo.setSubscribedHandler = { _, _ in
+            throw AppError.serverError(statusCode: 500, message: "Server Error")
+        }
+        let (vm, _) = makeSUT(channelRepo: channelRepo)
+
+        await vm.loadChannel()
+        #expect(vm.channel?.channelSubscribed == true)
+
+        await vm.toggleSubscription()
+
+        #expect(vm.channel?.channelSubscribed == true)
+        #expect(vm.errorMessage != nil)
+    }
+
     @Test func navigation_appendsRoute() {
         let (vm, router) = makeSUT()
         vm.navigateToVideo("vid-1")

@@ -72,6 +72,23 @@ struct ChannelDetailView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+
+                    Spacer()
+
+                    Button {
+                        Task { await viewModel.toggleSubscription() }
+                    } label: {
+                        Text(channel.channelSubscribed
+                             ? String(localized: "channel_unsubscribe")
+                             : String(localized: "channel_subscribe"))
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(channel.channelSubscribed ? Color(.systemGray4) : .accentColor)
+                    .accessibilityLabel(channel.channelSubscribed
+                        ? String(localized: "channel_unsubscribe")
+                        : String(localized: "channel_subscribe"))
                 }
                 .padding(.horizontal)
 

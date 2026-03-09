@@ -66,6 +66,21 @@ final class ChannelDetailViewModel {
         isLoadingMore = false
     }
 
+    func toggleSubscription() async {
+        guard var updatedChannel = channel else { return }
+        let newValue = !updatedChannel.channelSubscribed
+        updatedChannel.channelSubscribed = newValue
+        channel = updatedChannel
+
+        do {
+            try await channelRepository.setSubscribed(channelId: channelId, subscribed: newValue)
+        } catch {
+            updatedChannel.channelSubscribed = !newValue
+            channel = updatedChannel
+            router.handleError(error, errorMessage: &errorMessage)
+        }
+    }
+
     func removeDeletedVideos() {
         guard !router.deletedVideoIds.isEmpty else { return }
         videos.removeAll { router.deletedVideoIds.contains($0.youtubeId) }

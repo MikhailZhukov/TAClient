@@ -73,9 +73,14 @@ final class MockSearchRepository: SearchRepositoryProtocol {
 
 final class MockChannelRepository: ChannelRepositoryProtocol {
     var getChannelHandler: (String) async throws -> Channel = { _ in TestData.channel() }
+    var setSubscribedHandler: (String, Bool) async throws -> Void = { _, _ in }
 
     func getChannel(id: String) async throws -> Channel {
         try await getChannelHandler(id)
+    }
+
+    func setSubscribed(channelId: String, subscribed: Bool) async throws {
+        try await setSubscribedHandler(channelId, subscribed)
     }
 }
 

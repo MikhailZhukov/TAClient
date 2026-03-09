@@ -35,6 +35,7 @@ enum APIEndpoint {
 
     // Channels
     case channelDetail(id: String)
+    case updateChannel(id: String)
 
     var path: String {
         switch self {
@@ -76,12 +77,14 @@ enum APIEndpoint {
             return "/api/search/"
         case .channelDetail(let id):
             return "/api/channel/\(id)/"
+        case .updateChannel(let id):
+            return "/api/channel/\(id)/"
         }
     }
 
     var method: HTTPMethod {
         switch self {
-        case .login, .videoProgress, .ignoreVideo, .updateDownloadStatus, .addToDownloadQueue, .startDownload, .killTask:
+        case .login, .videoProgress, .ignoreVideo, .updateDownloadStatus, .addToDownloadQueue, .startDownload, .killTask, .updateChannel:
             return .post
         case .deleteVideo, .deleteVideoProgress, .deleteDownload:
             return .delete

@@ -8,6 +8,6 @@ struct Channel: Identifiable, Hashable {
     let channelThumbUrl: String?
     let channelBannerUrl: String?
     let channelDescription: String?
-    let channelSubscribed: Bool
+    var channelSubscribed: Bool
     let channelSubs: Int
 }

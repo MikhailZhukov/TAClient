@@ -58,6 +58,17 @@ extension DataLayerSuite {
         authState.handleUnauthorized()
     }
 
+    @Test func setSubscribed_sendsPostWithBody() async throws {
+        let (repo, authState) = makeRepo()
+        MockResponse.setUp(statusCode: 200, data: Data())
+
+        try await repo.setSubscribed(channelId: "UCxyz", subscribed: false)
+
+        #expect(MockURLProtocol.lastRequest?.httpMethod == "POST")
+        #expect(MockURLProtocol.lastRequest?.url?.path.contains("/api/channel/UCxyz") == true)
+        authState.handleUnauthorized()
+    }
+
     @Test func getChannel_404_throwsServerError() async {
         let (repo, authState) = makeRepo()
         MockResponse.setUp(statusCode: 404, json: ["detail": "Not found"])

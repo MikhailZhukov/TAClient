@@ -1,5 +1,13 @@
 import Foundation
 
+struct ChannelSubscribeDTO: Encodable {
+    let channelSubscribed: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case channelSubscribed = "channel_subscribed"
+    }
+}
+
 struct ChannelDTO: Decodable {
     let channelId: String?
     let channelName: String?

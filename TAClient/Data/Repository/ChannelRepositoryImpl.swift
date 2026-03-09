@@ -20,4 +20,11 @@ final class ChannelRepositoryImpl: ChannelRepositoryProtocol {
         }
         return channel
     }
+
+    func setSubscribed(channelId: String, subscribed: Bool) async throws {
+        try await apiClient.requestVoid(
+            endpoint: .updateChannel(id: channelId),
+            body: ChannelSubscribeDTO(channelSubscribed: subscribed)
+        )
+    }
 }

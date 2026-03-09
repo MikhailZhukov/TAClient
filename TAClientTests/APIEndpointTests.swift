@@ -83,6 +83,14 @@ extension DataLayerSuite {
         #expect(APIEndpoint.channelDetail(id: "UCxyz").path == "/api/channel/UCxyz/")
     }
 
+    @Test func updateChannel_path() {
+        #expect(APIEndpoint.updateChannel(id: "UCxyz").path == "/api/channel/UCxyz/")
+    }
+
+    @Test func updateChannel_method() {
+        #expect(APIEndpoint.updateChannel(id: "UCxyz").method == .post)
+    }
+
     // MARK: - HTTP Methods
 
     @Test func get_endpoints() {

@@ -68,6 +68,38 @@
         }
       }
     },
+    "channel_subscribe" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Subscribe"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подписаться"
+          }
+        }
+      }
+    },
+    "channel_unsubscribe" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unsubscribe"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отписаться"
+          }
+        }
+      }
+    },
     "dismiss" : {
       "localizations" : {
         "en" : {
