@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TAClient — iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 70 app files + 1 Share Extension file, 26 test files, 187+ passing tests. Licensed under GPL-3.0.
+TAClient — iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 70 app files + 1 Share Extension file, 26 test files, 207+ passing tests. Licensed under GPL-3.0.
 
 ## Build & Run
 
@@ -30,7 +30,7 @@ This app targets App Store publication. **Strictly follow Apple Human Interface 
 - **System colors only** — use `Color(.secondarySystemBackground)`, `Color(.tertiarySystemBackground)`, `.primary`, `.secondary`, etc. Never hardcode hex/RGB colors; all UI must adapt to Light and Dark Mode automatically
 - **Dynamic Type** — use SwiftUI text styles (`.headline`, `.subheadline`, `.caption`, etc.), never hardcoded font sizes
 - **Accessibility** — every interactive element must have `.accessibilityLabel()`. Use `Button` (not `.onTapGesture`) for tappable elements so VoiceOver announces them as buttons
-- **Destructive actions** — always require confirmation via `.confirmationDialog()` (delete, logout, etc.)
+- **Destructive actions** — always require confirmation via `.confirmationDialog()` (delete, logout, batch delete, etc.)
 - **SF Symbols** — use system icons, not custom assets
 - **Safe areas** — respect `safeAreaLayoutGuide` everywhere, especially on iPad
 - **Localization** — all user-visible strings via `String(localized: "snake_case_key")`, both en and ru
@@ -44,7 +44,7 @@ Clean Architecture with three layers, all under `TAClient/`:
 ```
 Domain/    → Models (Video, Channel, Comment, DownloadItem, DownloadTaskInfo, PlayerInfo)
              Repository protocols (5), AppError, CodecSupport
-Data/      → APIClient + APIEndpoint, DTOs (8), Mappers (5), KeychainService, AuthState,
+Data/      → APIClient + APIEndpoint, DTOs (9), Mappers (5), KeychainService, AuthState,
              AuthProxy, StreamingSession, Repository impls (5)
 Data/Cache → VideoCache (in-memory sliding window), CachingResourceLoader (AVAssetResourceLoaderDelegate)
 Presentation/ → Views + @Observable ViewModels per screen (VideoList, VideoDetail, Search,
@@ -58,14 +58,49 @@ DI/        → DependencyContainer (manual singleton)
 
 **Key patterns:**
 - `@Observable` ViewModels (iOS 17+) — no `@Published` needed
-- `AppRouter` (@Observable) manages app state (splash → login → main), `NavigationStack` path via typed `Route` enum, `deletedVideoIds` for cross-screen video removal, and `handleError()` helper for DRY error handling across all ViewModels
+- `AppRouter` (@Observable) manages app state (splash → login → main), `NavigationStack` path via typed `Route` enum, cross-screen state sync (`deletedVideoIds`, `watchedChanges`), and `handleError()` helper for DRY error handling across all ViewModels
 - `ImageCache` actor with `AuthenticatedAsyncImage` for auth'd image loading; negative result caching (60s cooldown) to prevent retry storms
 - `AuthState` (@Observable) wraps Keychain reads/writes for token + serverURL
 - Unauthorized (401/403) responses trigger `router.handleUnauthorized()` which clears Keychain and returns to login
 - `scenePhase` observer in `TAClientApp` forces window layout on `.active` — fixes stale safe area insets after iPad wake from sleep
 - Deleted videos removed from all lists (VideoList, ChannelDetail, Search) via `AppRouter.deletedVideoIds` + `.onChange` observers — no full reload needed
+- Watched state synced across screens via `AppRouter.watchedChanges: [String: Bool]` + `.onChange` observers
 - Pagination deduplication — `loadMoreIfNeeded` filters out already-loaded items by `youtubeId` to prevent duplicates from API drift
-- Optimistic removal with recovery — download queue items removed optimistically; on error, full refetch restores UI consistency
+- Optimistic UI updates with revert on error — used for watched toggle, subscribe toggle, download queue removal
+- Filter-aware list updates — `removeIfFilterMismatch()` removes videos from list when watched state no longer matches active `watchFilter`
+
+## Video List Features
+
+**Video type filter** (`VidTypeFilter` enum):
+- Toolbar title is a `Menu` with chevron — tapping shows Videos/Shorts/Streams/All options
+- API query param is `type` (NOT `vid_type` — `vid_type` is the response field name)
+- `setVidType()` creates its own `Task` inside the ViewModel — do NOT create `Task` in Menu button action (gets cancelled on menu dismiss)
+- No `.onChange` handler for vidTypeFilter — only `setVidType()` triggers reload (prevents double-firing)
+
+**Sort & filter** (`SortFilterMenu`):
+- Compact toolbar Menu with sort options, order toggle, watch filter
+- `.onChange` handlers on `sortOption`, `sortAscending`, `watchFilter` trigger `onSortOrFilterChanged()`
+- SwiftUI `Picker` inside `Menu` doesn't work reliably on iPad — use explicit `Button` with checkmark `Label` instead
+
+**Multi-select batch operations:**
+- Long press enters selection mode (first video auto-selected); context menu hidden during selection
+- `AdaptiveVideoGrid` shows checkmark overlay on selected cards, tap toggles selection
+- Selection toolbar: count (`.principal`), watched/unwatched/delete/select-all/cancel (`.topBarTrailing`)
+- Watched/unwatched buttons shown conditionally based on active watch filter (`showMarkWatched`/`showMarkUnwatched`)
+- Batch delete requires `.confirmationDialog()` confirmation
+- Deselecting all videos exits selection mode automatically
+- Works on VideoListView and ChannelDetailView
+
+**SwiftUI gotchas:**
+- `.contextMenu` intercepts long press before `.onLongPressGesture` — use conditional view modifier (`.if()`) to apply only one
+- `.adaptive` LazyVGrid has known rotation animation artifact on first orientation change — `.geometryGroup()` on ScrollView is the best mitigation but doesn't fully eliminate it
+- Do NOT use `.transaction { $0.animation = nil }` on images — causes massive layout delay (10+ seconds for column recount)
+
+## Channel Detail Features
+
+- Subscribe/unsubscribe button with optimistic toggle + revert on error
+- Multi-select batch operations (same as video list)
+- Watched state changes notify router via `markWatchedChanged()` for cross-screen sync
 
 ## Share Extension
 
@@ -103,6 +138,7 @@ DI/        → DependencyContainer (manual singleton)
 - `player.progress` is **0–100** (percentage), NOT 0–1. The TA frontend uses it as CSS `width: ${progress}%`
 - `youtube_id` in add-to-queue accepts **full YouTube URLs** (not just video IDs) — TA server parses them. The browser extension sends video IDs for individual videos, full URLs for channels
 - TA accepts multiple URL formats: `youtube.com/watch?v=`, `youtu.be/`, `youtube.com/shorts/`, `youtube.com/live/`, channel URLs, playlist URLs
+- Video type filter query param is `type` (NOT `vid_type`); response field is `vid_type`
 
 **Endpoints:**
 | Method | Path | Notes |
@@ -110,7 +146,7 @@ DI/        → DependencyContainer (manual singleton)
 | POST | `/api/user/login/` | Step 1: returns session cookie |
 | GET | `/api/appsettings/token/` | Step 2: returns `{"token": "..."}` |
 | GET | `/api/ping/` | Health check, returns `{"response": "pong"}` |
-| GET | `/api/video/?page=&sort=&order=&watch=&channel=` | Video list with filters |
+| GET | `/api/video/?page=&sort=&order=&watch=&type=` | Video list with filters |
 | GET | `/api/video/{id}/` | Video detail |
 | POST | `/api/video/{id}/progress/` | Save progress `{"position": N}` (seconds) |
 | DELETE | `/api/video/{id}/progress/` | Delete progress |
@@ -118,6 +154,8 @@ DI/        → DependencyContainer (manual singleton)
 | GET | `/api/video/{id}/comment/` | Video comments |
 | GET | `/api/search/?query=X&page=N` | Search (param is `query`, NOT `q`) |
 | GET | `/api/channel/{id}/` | Channel detail |
+| POST | `/api/channel/{id}/` | Update channel `{"channel_subscribed": bool}` |
+| POST | `/api/watched/` | Set watched `{"id": "...", "is_watched": bool}` |
 | GET | `/api/download/?page=&filter=` | Download queue |
 | POST | `/api/download/{id}/` | Update download status |
 | DELETE | `/api/download/{id}/` | Delete from queue |
@@ -171,12 +209,12 @@ Two player paths, selected automatically by `CodecSupport.requiredPlayer(for:)`:
 
 ## Testing
 
-**187+ tests, all passing.** Swift Testing framework (`@Test`, `#expect()`) — NOT XCTest.
+**207+ tests, all passing.** Swift Testing framework (`@Test`, `#expect()`) — NOT XCTest.
 
 | Phase | Tests | Scope |
 |-------|-------|-------|
 | 1 ✅ | 58 | Pure logic: mappers, codecs, errors, date formatting |
-| 2 ✅ | 51 | ViewModels + services with closure-based mock repos |
+| 2 ✅ | 71 | ViewModels + services with closure-based mock repos |
 | 3 ✅ | 79 | Data layer: APIClient, endpoints, all repository impls via MockURLProtocol |
 | 4 ❌ | — | Integration: VideoCache, CachingResourceLoader, ImageCache, KeychainService |
 
