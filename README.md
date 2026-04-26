@@ -36,17 +36,32 @@ If you prefer to build from source, see [Building](#building) below.
 
 ## Screenshots
 
-<!-- TODO: add screenshots once captured. Suggested layout:
-<div style="width:100%; display:flex; gap:8px;">
+### iPhone
 
-[<img src="docs/screenshots/iphone_library.png" width=19% alt="Library">](docs/screenshots/iphone_library.png)
-[<img src="docs/screenshots/iphone_player.png" width=19% alt="Player">](docs/screenshots/iphone_player.png)
-[<img src="docs/screenshots/iphone_channel.png" width=19% alt="Channel">](docs/screenshots/iphone_channel.png)
-[<img src="docs/screenshots/iphone_search.png" width=19% alt="Search">](docs/screenshots/iphone_search.png)
-[<img src="docs/screenshots/iphone_downloads.png" width=19% alt="Downloads">](docs/screenshots/iphone_downloads.png)
+<p align="center">
+  <a href="docs/screenshots/iphone_library.png"><img src="docs/screenshots/iphone_library.png" width="18%" alt="Library"></a>
+  <a href="docs/screenshots/iphone_video_detail.png"><img src="docs/screenshots/iphone_video_detail.png" width="18%" alt="Video detail"></a>
+  <a href="docs/screenshots/iphone_player.png"><img src="docs/screenshots/iphone_player.png" width="18%" alt="Player"></a>
+  <a href="docs/screenshots/iphone_channel.png"><img src="docs/screenshots/iphone_channel.png" width="18%" alt="Channel"></a>
+  <a href="docs/screenshots/iphone_search.png"><img src="docs/screenshots/iphone_search.png" width="18%" alt="Search"></a>
+</p>
+<p align="center">
+  <a href="docs/screenshots/iphone_downloads.png"><img src="docs/screenshots/iphone_downloads.png" width="18%" alt="Downloads"></a>
+  <a href="docs/screenshots/iphone_settings.png"><img src="docs/screenshots/iphone_settings.png" width="18%" alt="Settings"></a>
+</p>
 
-</div>
--->
+### iPad
+
+<p align="center">
+  <a href="docs/screenshots/ipad_library.png"><img src="docs/screenshots/ipad_library.png" width="32%" alt="Library"></a>
+  <a href="docs/screenshots/ipad_channel.png"><img src="docs/screenshots/ipad_channel.png" width="32%" alt="Channel"></a>
+  <a href="docs/screenshots/ipad_player.png"><img src="docs/screenshots/ipad_player.png" width="32%" alt="Player"></a>
+</p>
+<p align="center">
+  <a href="docs/screenshots/ipad_playlists.png"><img src="docs/screenshots/ipad_playlists.png" width="32%" alt="Playlists"></a>
+  <a href="docs/screenshots/ipad_downloads.png"><img src="docs/screenshots/ipad_downloads.png" width="32%" alt="Downloads"></a>
+  <a href="docs/screenshots/ipad_settings.png"><img src="docs/screenshots/ipad_settings.png" width="32%" alt="Settings"></a>
+</p>
 
 ## Why TA Client
 

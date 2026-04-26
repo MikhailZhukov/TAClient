@@ -32,3 +32,6 @@ log_f.txt
 
 # Internal planning notes
 docs/plans/
+
+# Raw simulator screenshots — curated copies live in docs/screenshots/
+/screenshots/
