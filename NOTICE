@@ -1,0 +1,15 @@
+TA Client
+Copyright 2026 Mikhail Zhukov
+
+This product includes software developed by the following third parties:
+
+  MobileVLCKit (https://code.videolan.org/videolan/VLCKit)
+  Copyright (C) VideoLAN
+  Licensed under the GNU Lesser General Public License, version 2.1 or
+  later (LGPL-2.1-or-later). MobileVLCKit is used as a dynamically
+  linked binary framework via the MobileVLCKit-SPM distribution
+  (https://github.com/MobileVLCKit-SPM/MobileVLCKit-SPM). The full
+  source for MobileVLCKit is available at the upstream URL above.
+
+This product was built collaboratively with Claude Code (Anthropic).
+The application icon was generated with ChatGPT (OpenAI).

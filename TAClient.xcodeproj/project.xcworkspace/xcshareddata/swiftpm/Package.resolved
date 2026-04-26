@@ -1,0 +1,15 @@
+{
+  "originHash" : "8dcad2c2aafc2f0d260766b9208f22015821e12c37de975b607d113e2b1d8803",
+  "pins" : [
+    {
+      "identity" : "mobilevlckit-spm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/MobileVLCKit-SPM/MobileVLCKit-SPM",
+      "state" : {
+        "revision" : "7678f12e04c56573295b32de9480d2136d3d8358",
+        "version" : "3.7.2"
+      }
+    }
+  ],
+  "version" : 3
+}
