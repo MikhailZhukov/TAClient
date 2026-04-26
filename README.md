@@ -16,6 +16,24 @@
 
 ---
 
+## Try it on your device — TestFlight beta
+
+TA Client is currently in public beta on Apple TestFlight. Anyone with an iPhone or iPad can install the latest build directly:
+
+> **[Join the TestFlight beta →](https://testflight.apple.com/join/V4wHhJSN)**
+
+How to install:
+
+1. Make sure the [TestFlight app](https://apps.apple.com/app/testflight/id899247664) from Apple is installed on your iPhone or iPad
+2. Tap the link above on your device
+3. Tap **Accept**, then **Install**
+
+Beta builds expire 90 days after upload; if your installed copy stops launching, return to TestFlight and update to the newest build. If you find a bug, please file it as a [GitHub issue](https://github.com/MikhailZhukov/TAClient/issues) or use TestFlight's built-in feedback (shake the device or take a screenshot in the app).
+
+If you prefer to build from source, see [Building](#building) below.
+
+---
+
 ## Screenshots
 
 <!-- TODO: add screenshots once captured. Suggested layout:
