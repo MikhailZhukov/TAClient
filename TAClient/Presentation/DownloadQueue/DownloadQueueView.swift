@@ -154,30 +154,28 @@ struct DownloadQueueView: View {
                     .disabled(viewModel.isStartingDownload || viewModel.filter != "pending" || viewModel.items.isEmpty)
                 }
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                HStack(spacing: 12) {
-                    if authState.isPrivileged {
-                        Button {
-                            Task { await viewModel.rescanSubscriptions() }
-                        } label: {
-                            if viewModel.isRescanningSubscriptions {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                            }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if authState.isPrivileged {
+                    Button {
+                        Task { await viewModel.rescanSubscriptions() }
+                    } label: {
+                        if viewModel.isRescanningSubscriptions {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.triangle.2.circlepath")
                         }
-                        .disabled(viewModel.isRescanningSubscriptions)
-                        .accessibilityLabel(String(localized: "download_rescan_button"))
                     }
-
-                    Picker(String(localized: "download_queue_title"), selection: Bindable(viewModel).filter) {
-                        Text(String(localized: "download_filter_pending")).tag("pending")
-                        Text(String(localized: "download_filter_ignore")).tag("ignore")
-                    }
-                    .pickerStyle(.segmented)
-                    .fixedSize()
+                    .disabled(viewModel.isRescanningSubscriptions)
+                    .accessibilityLabel(String(localized: "download_rescan_button"))
                 }
+
+                Picker(String(localized: "download_queue_title"), selection: Bindable(viewModel).filter) {
+                    Text(String(localized: "download_filter_pending")).tag("pending")
+                    Text(String(localized: "download_filter_ignore")).tag("ignore")
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
             }
         }
         .task {

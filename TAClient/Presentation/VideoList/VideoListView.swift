@@ -68,45 +68,43 @@ struct VideoListView: View {
                     Text(String(localized: "selection_count \(viewModel.selectedVideoIds.count)"))
                         .font(.headline)
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    HStack(spacing: 16) {
-                        if viewModel.showMarkWatched {
-                            Button {
-                                Task { await viewModel.batchSetWatched(true) }
-                            } label: {
-                                Image(systemName: "eye")
-                            }
-                            .accessibilityLabel(String(localized: "video_mark_watched"))
-                        }
-
-                        if viewModel.showMarkUnwatched {
-                            Button {
-                                Task { await viewModel.batchSetWatched(false) }
-                            } label: {
-                                Image(systemName: "eye.slash")
-                            }
-                            .accessibilityLabel(String(localized: "video_mark_unwatched"))
-                        }
-
-                        if authState.isPrivileged {
-                            Button {
-                                showDeleteConfirmation = true
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .accessibilityLabel(String(localized: "selection_delete"))
-                        }
-
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    if viewModel.showMarkWatched {
                         Button {
-                            viewModel.selectAll()
+                            Task { await viewModel.batchSetWatched(true) }
                         } label: {
-                            Image(systemName: "checkmark.circle")
+                            Image(systemName: "eye")
                         }
-                        .accessibilityLabel(String(localized: "selection_select_all"))
+                        .accessibilityLabel(String(localized: "video_mark_watched"))
+                    }
 
-                        Button(String(localized: "cancel")) {
-                            viewModel.cancelSelection()
+                    if viewModel.showMarkUnwatched {
+                        Button {
+                            Task { await viewModel.batchSetWatched(false) }
+                        } label: {
+                            Image(systemName: "eye.slash")
                         }
+                        .accessibilityLabel(String(localized: "video_mark_unwatched"))
+                    }
+
+                    if authState.isPrivileged {
+                        Button {
+                            showDeleteConfirmation = true
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .accessibilityLabel(String(localized: "selection_delete"))
+                    }
+
+                    Button {
+                        viewModel.selectAll()
+                    } label: {
+                        Image(systemName: "checkmark.circle")
+                    }
+                    .accessibilityLabel(String(localized: "selection_select_all"))
+
+                    Button(String(localized: "cancel")) {
+                        viewModel.cancelSelection()
                     }
                 }
             } else {
@@ -138,57 +136,55 @@ struct VideoListView: View {
                     }
                     .accessibilityLabel(String(localized: "vid_type_section_title"))
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    HStack(spacing: 16) {
-                        SortFilterMenu(
-                            sortOption: $viewModel.sortOption,
-                            sortAscending: $viewModel.sortAscending,
-                            watchFilter: $viewModel.watchFilter
-                        )
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    SortFilterMenu(
+                        sortOption: $viewModel.sortOption,
+                        sortAscending: $viewModel.sortAscending,
+                        watchFilter: $viewModel.watchFilter
+                    )
 
-                        Button {
-                            viewModel.navigateToPlaylists()
-                        } label: {
-                            Image(systemName: "music.note.list")
-                        }
-                        .accessibilityLabel(String(localized: "playlist_list_title"))
-
-                        Button {
-                            viewModel.navigateToDownloadQueue()
-                        } label: {
-                            Image(systemName: "arrow.down.circle")
-                                .overlay(alignment: .topTrailing) {
-                                    if viewModel.hasActiveDownloads {
-                                        Circle()
-                                            .fill(Color.blue)
-                                            .frame(width: 8, height: 8)
-                                            .offset(x: 2, y: -2)
-                                    }
-                                }
-                        }
-                        .accessibilityLabel(String(localized: "download_queue_title"))
-
-                        Button {
-                            viewModel.navigateToSearch()
-                        } label: {
-                            Image(systemName: "magnifyingglass")
-                        }
-                        .accessibilityLabel(String(localized: "search_hint"))
-
-                        Button {
-                            viewModel.navigateToSettings()
-                        } label: {
-                            Image(systemName: "gearshape")
-                        }
-                        .accessibilityLabel(String(localized: "settings_title"))
-
-                        Button {
-                            showLogoutConfirmation = true
-                        } label: {
-                            Image(systemName: "rectangle.portrait.and.arrow.right")
-                        }
-                        .accessibilityLabel(String(localized: "video_list_logout"))
+                    Button {
+                        viewModel.navigateToPlaylists()
+                    } label: {
+                        Image(systemName: "music.note.list")
                     }
+                    .accessibilityLabel(String(localized: "playlist_list_title"))
+
+                    Button {
+                        viewModel.navigateToDownloadQueue()
+                    } label: {
+                        Image(systemName: "arrow.down.circle")
+                            .overlay(alignment: .topTrailing) {
+                                if viewModel.hasActiveDownloads {
+                                    Circle()
+                                        .fill(Color.blue)
+                                        .frame(width: 8, height: 8)
+                                        .offset(x: 2, y: -2)
+                                }
+                            }
+                    }
+                    .accessibilityLabel(String(localized: "download_queue_title"))
+
+                    Button {
+                        viewModel.navigateToSearch()
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                    }
+                    .accessibilityLabel(String(localized: "search_hint"))
+
+                    Button {
+                        viewModel.navigateToSettings()
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel(String(localized: "settings_title"))
+
+                    Button {
+                        showLogoutConfirmation = true
+                    } label: {
+                        Image(systemName: "rectangle.portrait.and.arrow.right")
+                    }
+                    .accessibilityLabel(String(localized: "video_list_logout"))
                 }
             }
         }

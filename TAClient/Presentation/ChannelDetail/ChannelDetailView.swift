@@ -57,41 +57,39 @@ struct ChannelDetailView: View {
                     Text(String(localized: "selection_count \(viewModel.selectedVideoIds.count)"))
                         .font(.headline)
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    HStack(spacing: 16) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        Task { await viewModel.batchSetWatched(true) }
+                    } label: {
+                        Image(systemName: "eye")
+                    }
+                    .accessibilityLabel(String(localized: "video_mark_watched"))
+
+                    Button {
+                        Task { await viewModel.batchSetWatched(false) }
+                    } label: {
+                        Image(systemName: "eye.slash")
+                    }
+                    .accessibilityLabel(String(localized: "video_mark_unwatched"))
+
+                    if authState.isPrivileged {
                         Button {
-                            Task { await viewModel.batchSetWatched(true) }
+                            showDeleteConfirmation = true
                         } label: {
-                            Image(systemName: "eye")
+                            Image(systemName: "trash")
                         }
-                        .accessibilityLabel(String(localized: "video_mark_watched"))
+                        .accessibilityLabel(String(localized: "selection_delete"))
+                    }
 
-                        Button {
-                            Task { await viewModel.batchSetWatched(false) }
-                        } label: {
-                            Image(systemName: "eye.slash")
-                        }
-                        .accessibilityLabel(String(localized: "video_mark_unwatched"))
+                    Button {
+                        viewModel.selectAll()
+                    } label: {
+                        Image(systemName: "checkmark.circle")
+                    }
+                    .accessibilityLabel(String(localized: "selection_select_all"))
 
-                        if authState.isPrivileged {
-                            Button {
-                                showDeleteConfirmation = true
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .accessibilityLabel(String(localized: "selection_delete"))
-                        }
-
-                        Button {
-                            viewModel.selectAll()
-                        } label: {
-                            Image(systemName: "checkmark.circle")
-                        }
-                        .accessibilityLabel(String(localized: "selection_select_all"))
-
-                        Button(String(localized: "cancel")) {
-                            viewModel.cancelSelection()
-                        }
+                    Button(String(localized: "cancel")) {
+                        viewModel.cancelSelection()
                     }
                 }
             }

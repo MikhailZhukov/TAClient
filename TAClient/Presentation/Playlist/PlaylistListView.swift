@@ -56,33 +56,31 @@ struct PlaylistListView: View {
         .navigationTitle(String(localized: "playlist_list_title"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                HStack(spacing: 16) {
-                    Menu {
-                        ForEach(PlaylistTypeFilter.allCases, id: \.self) { filter in
-                            Button {
-                                viewModel.typeFilter = filter
-                                viewModel.onFilterChanged()
-                            } label: {
-                                if viewModel.typeFilter == filter {
-                                    Label(filter.label, systemImage: "checkmark")
-                                } else {
-                                    Text(filter.label)
-                                }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Menu {
+                    ForEach(PlaylistTypeFilter.allCases, id: \.self) { filter in
+                        Button {
+                            viewModel.typeFilter = filter
+                            viewModel.onFilterChanged()
+                        } label: {
+                            if viewModel.typeFilter == filter {
+                                Label(filter.label, systemImage: "checkmark")
+                            } else {
+                                Text(filter.label)
                             }
                         }
-                    } label: {
-                        Image(systemName: "line.3.horizontal.decrease.circle")
                     }
-                    .accessibilityLabel(String(localized: "playlist_filter_title"))
-
-                    Button {
-                        viewModel.showCreateDialog = true
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .accessibilityLabel(String(localized: "playlist_create"))
+                } label: {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
                 }
+                .accessibilityLabel(String(localized: "playlist_filter_title"))
+
+                Button {
+                    viewModel.showCreateDialog = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityLabel(String(localized: "playlist_create"))
             }
         }
         .alert(String(localized: "playlist_create"), isPresented: $viewModel.showCreateDialog) {
