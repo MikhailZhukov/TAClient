@@ -813,6 +813,22 @@
     "MobileVLCKit" : {
 
     },
+    "more_actions" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "More"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ещё"
+          }
+        }
+      }
+    },
     "player_error_generic" : {
       "localizations" : {
         "en" : {

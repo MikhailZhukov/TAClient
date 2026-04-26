@@ -136,24 +136,50 @@ struct VideoListView: View {
                     }
                     .accessibilityLabel(String(localized: "vid_type_section_title"))
                 }
-                ToolbarItemGroup(placement: .topBarTrailing) {
+                ToolbarItem(placement: .topBarTrailing) {
                     SortFilterMenu(
                         sortOption: $viewModel.sortOption,
                         sortAscending: $viewModel.sortAscending,
                         watchFilter: $viewModel.watchFilter
                     )
-
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        viewModel.navigateToPlaylists()
+                        viewModel.navigateToSearch()
                     } label: {
-                        Image(systemName: "music.note.list")
+                        Image(systemName: "magnifyingglass")
                     }
-                    .accessibilityLabel(String(localized: "playlist_list_title"))
+                    .accessibilityLabel(String(localized: "search_hint"))
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            viewModel.navigateToPlaylists()
+                        } label: {
+                            Label(String(localized: "playlist_list_title"), systemImage: "music.note.list")
+                        }
 
-                    Button {
-                        viewModel.navigateToDownloadQueue()
+                        Button {
+                            viewModel.navigateToDownloadQueue()
+                        } label: {
+                            Label(String(localized: "download_queue_title"), systemImage: "arrow.down.circle")
+                        }
+
+                        Button {
+                            viewModel.navigateToSettings()
+                        } label: {
+                            Label(String(localized: "settings_title"), systemImage: "gearshape")
+                        }
+
+                        Divider()
+
+                        Button(role: .destructive) {
+                            showLogoutConfirmation = true
+                        } label: {
+                            Label(String(localized: "video_list_logout"), systemImage: "rectangle.portrait.and.arrow.right")
+                        }
                     } label: {
-                        Image(systemName: "arrow.down.circle")
+                        Image(systemName: "ellipsis.circle")
                             .overlay(alignment: .topTrailing) {
                                 if viewModel.hasActiveDownloads {
                                     Circle()
@@ -163,28 +189,7 @@ struct VideoListView: View {
                                 }
                             }
                     }
-                    .accessibilityLabel(String(localized: "download_queue_title"))
-
-                    Button {
-                        viewModel.navigateToSearch()
-                    } label: {
-                        Image(systemName: "magnifyingglass")
-                    }
-                    .accessibilityLabel(String(localized: "search_hint"))
-
-                    Button {
-                        viewModel.navigateToSettings()
-                    } label: {
-                        Image(systemName: "gearshape")
-                    }
-                    .accessibilityLabel(String(localized: "settings_title"))
-
-                    Button {
-                        showLogoutConfirmation = true
-                    } label: {
-                        Image(systemName: "rectangle.portrait.and.arrow.right")
-                    }
-                    .accessibilityLabel(String(localized: "video_list_logout"))
+                    .accessibilityLabel(String(localized: "more_actions"))
                 }
             }
         }
