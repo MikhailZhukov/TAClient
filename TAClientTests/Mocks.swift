@@ -191,6 +191,21 @@ final class MockPlaylistRepository: PlaylistRepositoryProtocol {
     }
 }
 
+// MARK: - Mock Router Factory
+
+/// Builds a fresh `(KeychainService, AuthState, AppRouter)` triple for tests.
+///
+/// Many tests need only the `AppRouter` but must construct the keychain +
+/// auth-state stack first. This helper hides the boilerplate while keeping
+/// each call independent (no shared static state across tests).
+@MainActor
+func makeMockRouter() -> (keychain: KeychainService, authState: AuthState, router: AppRouter) {
+    let keychain = KeychainService()
+    let authState = AuthState(keychainService: keychain)
+    let router = AppRouter(authState: authState)
+    return (keychain, authState, router)
+}
+
 // MARK: - Test Data Factory
 
 enum TestData {

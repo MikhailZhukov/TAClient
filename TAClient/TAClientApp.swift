@@ -58,31 +58,31 @@ struct RootView: View {
             }
         case .login:
             NavigationStack {
-                LoginView(viewModel: container.makeLoginViewModel())
+                LoginScreen { container.makeLoginViewModel() }
                     .navigationTitle("Tube Archivist")
                     .navigationBarTitleDisplayMode(.inline)
             }
         case .authenticated:
             NavigationStack(path: $router.path) {
-                VideoListView(viewModel: container.makeVideoListViewModel())
+                VideoListScreen { container.makeVideoListViewModel() }
                     .navigationDestination(for: Route.self) { route in
                         switch route {
                         case .videoList:
-                            VideoListView(viewModel: container.makeVideoListViewModel())
+                            VideoListScreen { container.makeVideoListViewModel() }
                         case .videoDetail(let videoId):
-                            VideoDetailView(viewModel: container.makeVideoDetailViewModel(videoId: videoId))
+                            VideoDetailScreen { container.makeVideoDetailViewModel(videoId: videoId) }
                         case .search:
-                            SearchView(viewModel: container.makeSearchViewModel())
+                            SearchScreen { container.makeSearchViewModel() }
                         case .channelDetail(let channelId):
-                            ChannelDetailView(viewModel: container.makeChannelDetailViewModel(channelId: channelId))
+                            ChannelDetailScreen { container.makeChannelDetailViewModel(channelId: channelId) }
                         case .downloadQueue:
-                            DownloadQueueView(viewModel: container.makeDownloadQueueViewModel())
+                            DownloadQueueScreen { container.makeDownloadQueueViewModel() }
                         case .playlistList:
-                            PlaylistListView(viewModel: container.makePlaylistListViewModel())
+                            PlaylistListScreen { container.makePlaylistListViewModel() }
                         case .playlistDetail(let playlistId):
-                            PlaylistDetailView(viewModel: container.makePlaylistDetailViewModel(playlistId: playlistId))
+                            PlaylistDetailScreen { container.makePlaylistDetailViewModel(playlistId: playlistId) }
                         case .settings:
-                            SettingsView(viewModel: container.makeSettingsViewModel())
+                            SettingsScreen { container.makeSettingsViewModel() }
                         case .about:
                             AboutView()
                         }

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TAClient — iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 95 app files + 1 Share Extension file, 44 test files, 423 passing tests. Licensed under Apache-2.0 (MobileVLCKit remains under LGPL-2.1-or-later — see `NOTICE`).
+TAClient — iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 103 app files + 1 Share Extension file, 48 test files, 460 passing tests. Licensed under Apache-2.0 (MobileVLCKit remains under LGPL-2.1-or-later — see `NOTICE`).
 
 ## Build & Run
 
@@ -69,6 +69,15 @@ DI/        → DependencyContainer (manual singleton)
 - Pagination deduplication — `loadMoreIfNeeded` filters out already-loaded items by `youtubeId` to prevent duplicates from API drift
 - Optimistic UI updates with revert on error — used for watched toggle, subscribe toggle, download queue removal
 - Filter-aware list updates — `removeIfFilterMismatch()` removes videos from list when watched state no longer matches active `watchFilter`
+
+**ViewModel lifecycle in NavigationStack:**
+- Each route in `TAClientApp.swift` uses a thin wrapper `<Feature>Screen` (e.g. `VideoDetailScreen`, `ChannelDetailScreen`, `PlaylistDetailScreen`, `VideoListScreen`, `SearchScreen`, `DownloadQueueScreen`, `PlaylistListScreen`, `SettingsScreen`, `LoginScreen`) instead of constructing the VM inline
+- Wrapper signature: `init(make: () -> VM)` storing the result via `_viewModel = State(wrappedValue: make())`
+- Why: SwiftUI re-evaluates the `navigationDestination` closure (and any container body) on every parent body re-render. An inline `viewModel: container.makeXVM()` constructs a new VM each re-eval, accumulating parallel VMs (confirmed bug — multiple `AVPlayer` instances saturating the connection pool, duplicate observers, `Buffer underrun` log lines fired 6× per event). The `@State`-stored wrapper persists the VM across re-evals tied to the same view identity — created once per push, torn down once per pop
+- Invariant: VM `init` must remain side-effect-free (no `Task`s, no observers, no `AVPlayer` allocation, no network calls). The `make` closure still runs on every body re-eval; only the FIRST result becomes `@State` storage and the rest are discarded. Side effects belong in `.task {}` / `.onAppear` / explicit lifecycle methods on the leaf view
+- Do NOT collapse the 9 named wrappers into a generic `VMOwningView<VM, Content>` — named types support per-screen `#Preview` blocks, the call site reads better in `TAClientApp.swift`, and the side-effect-free-init contract lives per-file as a comment near each wrapper for grep + code review
+- Do NOT swap the explicit closure for `@autoclosure` — the explicit braces at the call site (`VideoDetailScreen { container.makeVideoDetailViewModel(videoId: videoId) }`) signal that construction is deferred and make the throwaway-init invariant visible at every use site
+- Test coverage: `TAClientTests/WrapperLifecycleTests.swift` — factory-counting tests for each wrapper assert the factory closure is invoked exactly once per init (catches regressions where someone moves construction outside `_viewModel = State(wrappedValue: make())`, e.g. introducing a stored property `let viewModel = make()`)
 
 ## Video List Features
 
@@ -220,6 +229,11 @@ Two player paths, selected automatically by `CodecSupport.requiredPlayer(for:)`:
 - Progress saved every 10s; VLC also saves on stop via `lastVLCPosition`
 - VLC restarts media only on `.error` state (NOT `.ended`) — restarting on `.ended` causes infinite loop of last seconds
 
+**Temporary diagnostic instrumentation (slated for v0.9.1 cleanup):**
+- `VideoDetailViewModel` and `VideoDetailView` carry a set of diagnostic helpers added during the VM-recreation freeze investigation: `tailObserver`, `freezeWatchdogTask`, `recordSeek` / `detectBackwardJump`, `observeAVLogs`, `logVideoFormat`, fullscreen lifecycle logs, plus several `.info → .notice` log-level promotions. These tag log lines with `[Tail]`, `[Freeze]`, `[TailReplay]`, `[Seek]`, `[Format]`, `[AVAccess]`, `[AVError]`, `[Fullscreen]`.
+- They proved the VM-recreation antipattern in production logs (`Buffer underrun` × 6, parallel `pts=` reads in distant byte regions of the same MP4) and surfaced a separate tail-replay bug at end-of-stream on fullscreen exit.
+- They are intentionally retained on `main` for now so the next TestFlight build can confirm the wrapper fix in the wild, and so the tail-replay mini-fix can use the same telemetry. **Removal is tracked in a separate cleanup plan** before App Store v0.9.1 submission — do not extend or repurpose this instrumentation without owning the cleanup task.
+
 ## User Privileges
 
 Privilege-based UI gating — admin features hidden for non-privileged users.
@@ -264,14 +278,17 @@ Automatic skip of sponsor segments and other non-content sections during playbac
 
 ## Testing
 
-**423 tests, all passing.** Swift Testing framework (`@Test`, `#expect()`) — NOT XCTest.
+**460 tests, all passing.** Swift Testing framework (`@Test`, `#expect()`) — NOT XCTest.
+
+Phase counts below are approximate scope buckets, not exact tallies — suites have grown organically and a number of cross-cutting suites (`AppRouterTests`, `AuthStateTests`, `NotificationTests`, `SponsorBlock*Tests`, `UserPrivilegesTests`, `PlayerGestureTests`, `SimilarVideosTests`, several ViewModel suites, etc.) cover behaviour spanning multiple phases. Only the 460 total is canonical.
 
 | Phase | Tests | Scope |
 |-------|-------|-------|
-| 1 ✅ | 58 | Pure logic: mappers, codecs, errors, date formatting |
-| 2 ✅ | 71 | ViewModels + services with closure-based mock repos |
-| 3 ✅ | 79 | Data layer: APIClient, endpoints, all repository impls via MockURLProtocol |
-| 4 ✅ | ~82 | Playback + cache: `CacheStoreTests` (25 sync-API tests), `CacheStoreStressTests` (concurrent readers/writer under `@Suite(.serialized)`), `CachingResourceLoaderTests`, `CacheAuthFailureTests` (401/403 → `.taAuthUnauthorized`), `VideoCachePreloaderTests` (incl. baseline + memory pressure), `PlayerSessionCoordinatorTests` (interruption/route/mediaServicesReset), `NowPlayingControllerTests`, `ObserverBagTests` |
+| 1 ✅ | ~58 | Pure logic: mappers, codecs, errors, date formatting |
+| 2 ✅ | ~71 | ViewModels + services with closure-based mock repos |
+| 3 ✅ | ~79 | Data layer: APIClient, endpoints, all repository impls via MockURLProtocol |
+| 4 ✅ | 73 | Playback + cache: `CacheStoreTests` (25 sync-API tests), `CacheStoreStressTests` (concurrent readers/writer under `@Suite(.serialized)`), `CachingResourceLoaderTests`, `CacheAuthFailureTests` (401/403 → `.taAuthUnauthorized`), `VideoCachePreloaderTests` (incl. baseline + memory pressure), `PlayerSessionCoordinatorTests` (interruption/route/mediaServicesReset), `NowPlayingControllerTests`, `ObserverBagTests` |
+| 5 ✅ | 18 | Navigation lifecycle: `WrapperLifecycleTests` — factory-counting tests for each `*Screen` wrapper (one-shot + two-instance) defending the screen-wrapper structural contract |
 
 **Test infrastructure:**
 - `Mocks.swift` — closure-based mock repositories + `TestData` factory (supports `startIndex` for pagination dedup tests)

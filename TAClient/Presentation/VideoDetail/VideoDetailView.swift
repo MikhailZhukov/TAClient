@@ -1,5 +1,8 @@
 import SwiftUI
 import AVKit
+import OSLog
+
+private nonisolated let viewLogger = Logger(subsystem: "ru.mzhukov.TAClient", category: "VideoDetailView")
 
 struct VideoDetailView: View {
     @Bindable var viewModel: VideoDetailViewModel
@@ -327,7 +330,7 @@ struct VideoDetailView: View {
 
 // MARK: - AVPlayer Wrapper
 
-private struct AVPlayerView: UIViewControllerRepresentable {
+struct AVPlayerView: UIViewControllerRepresentable {
     let player: AVPlayer
     @Binding var isFullScreen: Bool
     @Binding var isPiPActive: Bool
@@ -388,6 +391,28 @@ private struct AVPlayerView: UIViewControllerRepresentable {
             self.onDoubleTap = onDoubleTap
         }
 
+        /// Decides whether to resume playback after fullscreen exit.
+        ///
+        /// Re-checks both `status` (which may have transitioned to .paused mid-animation
+        /// when the item reached end-of-stream) and `currentTime` vs `duration` (belt-and-
+        /// suspenders for the race where status hasn't yet transitioned but position is at
+        /// end). Both checks must pass in addition to `wasPlaying`.
+        ///
+        /// `.waitingToPlayAtSpecifiedRate` is intentionally treated as "not playing" —
+        /// matches the existing `wasPlaying = (status == .playing)` snapshot semantic.
+        /// Do NOT change this to `status != .paused` — would silently regress.
+        static func shouldResumePlayback(
+            wasPlaying: Bool,
+            status: AVPlayer.TimeControlStatus,
+            currentTime: Double,
+            duration: Double
+        ) -> Bool {
+            guard wasPlaying else { return false }
+            guard status == .playing else { return false }
+            let nearEnd = duration > 0 && currentTime >= duration - 0.5
+            return !nearEnd
+        }
+
         @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
             guard let view = recognizer.view else { return }
             let location = recognizer.location(in: view)
@@ -421,6 +446,10 @@ private struct AVPlayerView: UIViewControllerRepresentable {
             _ playerViewController: AVPlayerViewController,
             willBeginFullScreenPresentationWithAnimationCoordinator coordinator: UIViewControllerTransitionCoordinator
         ) {
+            // TODO(v0.9.1 cleanup): remove with diagnostic instrumentation
+            let t = playerViewController.player?.currentTime().seconds ?? -1
+            let rate = playerViewController.player?.rate ?? 0
+            viewLogger.notice("[Fullscreen] willBegin t=\(String(format: "%.2f", t))s rate=\(rate)")
             isFullScreen.wrappedValue = true
         }
 
@@ -428,11 +457,23 @@ private struct AVPlayerView: UIViewControllerRepresentable {
             _ playerViewController: AVPlayerViewController,
             willEndFullScreenPresentationWithAnimationCoordinator coordinator: UIViewControllerTransitionCoordinator
         ) {
+            // TODO(v0.9.1 cleanup): remove with diagnostic instrumentation
             let wasPlaying = playerViewController.player?.timeControlStatus == .playing
+            let t = playerViewController.player?.currentTime().seconds ?? -1
+            let rate = playerViewController.player?.rate ?? 0
+            viewLogger.notice("[Fullscreen] willEnd t=\(String(format: "%.2f", t))s rate=\(rate) wasPlaying=\(wasPlaying)")
             coordinator.animate(alongsideTransition: nil) { [self] _ in
                 isFullScreen.wrappedValue = false
-                if wasPlaying {
-                    playerViewController.player?.play()
+                let player = playerViewController.player
+                let shouldResume = Coordinator.shouldResumePlayback(
+                    wasPlaying: wasPlaying,
+                    status: player?.timeControlStatus ?? .paused,
+                    currentTime: player?.currentTime().seconds ?? 0,
+                    duration: player?.currentItem?.duration.seconds ?? 0
+                )
+                if shouldResume {
+                    viewLogger.notice("[Fullscreen] resumePlay-after-exit")
+                    player?.play()
                 }
             }
         }

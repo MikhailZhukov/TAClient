@@ -44,6 +44,8 @@ final class VideoDetailViewModel {
     private var timeObserver: Any?
     private var saveProgressObserver: Any?
     private var sponsorBlockObserver: Any?
+    private var tailObserver: Any?
+    private var freezeWatchdogTask: Task<Void, Never>?
     /// Tracks the last position persisted via `saveProgress`. Used to skip the
     /// 30s progress POST when the player is paused (time doesn't advance ⇒
     /// nothing new to save). `-1` means "no save yet".
@@ -65,6 +67,16 @@ final class VideoDetailViewModel {
     /// Throttles cache-health logs to once per 3s from the 1s UI observer.
     @ObservationIgnored
     nonisolated(unsafe) private var lastCacheLogTime: CFAbsoluteTime = 0
+    /// Last currentTime sample seen by the 1Hz observer — used to detect
+    /// unexpected backward jumps (bug 1: tail replay). Same isolation as the
+    /// other progressQueue-touched scalars.
+    @ObservationIgnored
+    nonisolated(unsafe) private var lastTickPosition: Double = -1
+    /// Wallclock time of the most recent explicit `seek()` call we made (any
+    /// reason). The backward-jump detector ignores jumps that happen within
+    /// 1s of an explicit seek — those are intentional, not a replay bug.
+    @ObservationIgnored
+    nonisolated(unsafe) private var lastExplicitSeekAt: CFAbsoluteTime = 0
     /// Serialises access to the two scalars above across the MainActor ⇄
     /// `progressQueue` boundary. Cheap — only taken around trivial reads/
     /// writes on the periodic observers' hot path.
@@ -112,6 +124,7 @@ final class VideoDetailViewModel {
             guard current.isFinite else { return }
             let target = forward ? current + interval : max(0, current - interval)
             let time = CMTime(seconds: target, preferredTimescale: 600)
+            recordSeek("[Seek] reason=seekByInterval forward=\(forward) from=\(String(format: "%.2f", current))s to=\(String(format: "%.2f", target))s")
             player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
             showSeekFeedback(forward: forward)
         } else if vlcMediaURL != nil {
@@ -175,15 +188,19 @@ final class VideoDetailViewModel {
         // the duplicate buffer bounded.
         playerItem.preferredForwardBufferDuration = 30
         let avPlayer = AVPlayer(playerItem: playerItem)
+        logger.notice("[Start] actionAtItemEnd=\(avPlayer.actionAtItemEnd.rawValue) startPosition=\(self.startPosition)s duration=\(video.duration)s isUsingDirectAsset=\(self.isUsingDirectAsset)")
 
         if startPosition > 0 {
             let time = CMTime(seconds: startPosition, preferredTimescale: 600)
+            recordSeek("[Seek] reason=startup to=\(self.startPosition)s")
             avPlayer.seek(to: time)
         }
 
         registerPlayerObservers(player: avPlayer, videoId: video.youtubeId, duration: Double(video.duration))
         registerItemObservers(playerItem, videoId: video.youtubeId, duration: Double(video.duration))
         observeSponsorBlock(avPlayer)
+        registerTailObserver(player: avPlayer, duration: Double(video.duration))
+        startFreezeWatchdog()
 
         self.player = avPlayer
         avPlayer.play()
@@ -233,6 +250,7 @@ final class VideoDetailViewModel {
             guard let self else { return }
             let seconds = time.seconds
             if seconds.isFinite && seconds > 0 {
+                self.detectBackwardJump(current: seconds)
                 self.logCacheHealth(videoId: cachedVideoId, playbackPosition: seconds, duration: duration)
                 Task { @MainActor in
                     self.nowPlaying?.refresh()
@@ -254,13 +272,16 @@ final class VideoDetailViewModel {
         // `lastSavedPosition` (which the ViewModel reads as "confirmed
         // persisted") only advances on success.
         let saveInterval = CMTime(seconds: 30, preferredTimescale: 600)
-        saveProgressObserver = avPlayer.addPeriodicTimeObserver(forInterval: saveInterval, queue: progressQueue) { [weak self] time in
-            guard let self else { return }
+        saveProgressObserver = avPlayer.addPeriodicTimeObserver(forInterval: saveInterval, queue: progressQueue) { [weak self, weak avPlayer] time in
+            guard let self, let avPlayer else { return }
             let seconds = time.seconds
-            guard seconds.isFinite && seconds > 0 else { return }
             self.progressStateLock.lock()
             let lastAttempted = self.lastAttemptedSavePosition
-            let shouldSave = abs(seconds - lastAttempted) >= 1
+            let shouldSave = VideoDetailViewModel.shouldSaveProgress(
+                rate: avPlayer.rate,
+                seconds: seconds,
+                lastAttempted: lastAttempted
+            )
             if shouldSave {
                 self.lastAttemptedSavePosition = seconds
             }
@@ -321,6 +342,12 @@ final class VideoDetailViewModel {
         observerBag.addKVO(stallToken)
 
         let itemStatusToken = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            if item.status == .readyToPlay {
+                Task { @MainActor [weak self] in
+                    guard let self, let currentItem = self.player?.currentItem else { return }
+                    await self.logVideoFormat(currentItem)
+                }
+            }
             guard item.status == .failed else { return }
             let message = item.error?.localizedDescription ?? String(localized: "player_error_generic")
             Task { @MainActor [weak self] in
@@ -331,6 +358,34 @@ final class VideoDetailViewModel {
 
         observeFailedToPlayToEnd(item)
         observeDidPlayToEnd(item)
+        observeAVLogs(item)
+    }
+
+    /// Subscribes to AVPlayerItem's native access + error log streams. Each
+    /// new entry is mirrored into our Logger so the captured log shows
+    /// AVPlayer's own diagnostic stream alongside our app-level events.
+    /// Critical for diagnosing AV1 decoder issues (errorLog often surfaces
+    /// CoreMediaErrorDomain codes the public APIs hide).
+    private func observeAVLogs(_ item: AVPlayerItem) {
+        let accessToken = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.newAccessLogEntryNotification,
+            object: item,
+            queue: .main
+        ) { [weak item] _ in
+            guard let item, let event = item.accessLog()?.events.last else { return }
+            logger.info("[AVAccess] indicatedBitrate=\(Int(event.indicatedBitrate)) observedBitrate=\(Int(event.observedBitrate)) stalls=\(event.numberOfStalls) droppedFrames=\(event.numberOfDroppedVideoFrames) durationWatched=\(String(format: "%.1f", event.durationWatched)) playbackType=\(event.playbackType ?? "?")")
+        }
+        observerBag.addNotification(accessToken)
+
+        let errorToken = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.newErrorLogEntryNotification,
+            object: item,
+            queue: .main
+        ) { [weak item] _ in
+            guard let item, let event = item.errorLog()?.events.last else { return }
+            logger.error("[AVError] code=\(event.errorStatusCode) domain=\(event.errorDomain, privacy: .public) comment=\(event.errorComment ?? "?", privacy: .public)")
+        }
+        observerBag.addNotification(errorToken)
     }
 
     /// Creates the `PlayerSessionCoordinator` and wires its five callbacks to
@@ -385,6 +440,7 @@ final class VideoDetailViewModel {
             onSeek: { [weak self] positionTime in
                 guard let self, let player = self.player else { return }
                 let time = CMTime(seconds: positionTime, preferredTimescale: 600)
+                recordSeek("[Seek] reason=nowPlayingRemote to=\(String(format: "%.2f", positionTime))s")
                 player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
                 self.nowPlaying?.refresh()
             }
@@ -420,6 +476,7 @@ final class VideoDetailViewModel {
         )
         let item = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: [.tracks, .duration])
         player.replaceCurrentItem(with: item)
+        recordSeek("[Seek] reason=airplaySwap to=\(String(format: "%.2f", currentTime.seconds))s")
         player.seek(to: currentTime, toleranceBefore: .zero, toleranceAfter: .zero)
         cachingResourceLoader = nil
         isUsingDirectAsset = true
@@ -431,7 +488,7 @@ final class VideoDetailViewModel {
         // duplicate KVO registration — see its docstring for the rationale.
         registerItemObservers(item, videoId: video.youtubeId, duration: Double(video.duration))
 
-        logger.info("AirPlay active: switched to direct streaming")
+        logger.notice("AirPlay active: switched to direct streaming")
     }
 
     private func observeFailedToPlayToEnd(_ item: AVPlayerItem) {
@@ -469,6 +526,10 @@ final class VideoDetailViewModel {
     func handleDidPlayToEnd() {
         guard let video else { return }
         let finalPosition = Double(video.duration)
+        let actualTime = player?.currentTime().seconds ?? -1
+        let action = player?.actionAtItemEnd.rawValue ?? -1
+        let rate = player?.rate ?? 0
+        logger.notice("[End] DidPlayToEnd currentTime=\(actualTime, format: .fixed(precision: 2))s declaredDuration=\(finalPosition)s actionAtItemEnd=\(action) rate=\(rate)")
         progressStateLock.lock()
         lastSavedPosition = finalPosition
         lastAttemptedSavePosition = finalPosition
@@ -494,7 +555,7 @@ final class VideoDetailViewModel {
             let pos = Int(player.currentTime().seconds)
             let bufferEmpty = player.currentItem?.isPlaybackBufferEmpty ?? false
             let keepUp = player.currentItem?.isPlaybackLikelyToKeepUp ?? false
-            logger.info("timeControlStatus=\(status.rawValue) reason=\(reason) pos=\(pos)s bufferEmpty=\(bufferEmpty) keepUp=\(keepUp)")
+            logger.notice("timeControlStatus=\(status.rawValue) reason=\(reason, privacy: .public) pos=\(pos)s bufferEmpty=\(bufferEmpty) keepUp=\(keepUp)")
             if status == .playing {
                 guard let self else { return }
                 Task { @MainActor in
@@ -508,6 +569,159 @@ final class VideoDetailViewModel {
             }
         }
         observerBag.addKVO(statusToken)
+    }
+
+    // MARK: - Diagnostics (temporary instrumentation)
+    // TODO(v0.9.1 cleanup): remove with diagnostic instrumentation
+
+    /// Tail-end periodic observer firing every 0.5s but logging only when the
+    /// playhead is within the last 5 seconds of the video. Gives a per-tick
+    /// timeline of end-of-stream — surfaces reverse seeks / replay loops.
+    private func registerTailObserver(player avPlayer: AVPlayer, duration: Double) {
+        guard duration > 0 else { return }
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        tailObserver = avPlayer.addPeriodicTimeObserver(forInterval: interval, queue: progressQueue) { [weak self] time in
+            guard let self, let player = self.player else { return }
+            let seconds = time.seconds
+            guard seconds.isFinite, seconds > duration - 5 else { return }
+            let rate = player.rate
+            let status = player.timeControlStatus.rawValue
+            let item = player.currentItem
+            let keepUp = item?.isPlaybackLikelyToKeepUp ?? false
+            let bufferEmpty = item?.isPlaybackBufferEmpty ?? false
+            logger.info("[Tail] t=\(String(format: "%.2f", seconds))s/\(String(format: "%.2f", duration))s rate=\(rate) status=\(status) keepUp=\(keepUp) bufferEmpty=\(bufferEmpty)")
+        }
+    }
+
+    /// 1Hz watchdog that detects video freezes (currentTime not advancing
+    /// while rate>0 and timeControlStatus==.playing). Logs FREEZE_DETECTED
+    /// with a full state dump after 3 consecutive stalled samples.
+    private func startFreezeWatchdog() {
+        freezeWatchdogTask?.cancel()
+        freezeWatchdogTask = Task { @MainActor [weak self] in
+            var lastTime: Double = -1
+            var stuckCount = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self, let player = self.player else { return }
+                let current = player.currentTime().seconds
+                let rate = player.rate
+                let status = player.timeControlStatus
+                let isPlaying = (status == .playing && rate > 0)
+                guard isPlaying, current.isFinite else {
+                    lastTime = current
+                    stuckCount = 0
+                    continue
+                }
+                if lastTime >= 0 && abs(current - lastTime) < 0.3 {
+                    stuckCount += 1
+                } else {
+                    stuckCount = 0
+                }
+                if stuckCount == 3 {
+                    let item = player.currentItem
+                    let bufferEmpty = item?.isPlaybackBufferEmpty ?? false
+                    let keepUp = item?.isPlaybackLikelyToKeepUp ?? false
+                    let ranges = item?.loadedTimeRanges
+                        .map { $0.timeRangeValue }
+                        .map { String(format: "[%.1f+%.1f]", $0.start.seconds, $0.duration.seconds) }
+                        .joined(separator: ",") ?? "none"
+                    let lastErr = item?.errorLog()?.events.last
+                    let errStr = lastErr.map { "code=\($0.errorStatusCode) domain=\($0.errorDomain) comment=\($0.errorComment ?? "?")" } ?? "none"
+                    let itemErr = item?.error?.localizedDescription ?? "nil"
+                    logger.error("[Freeze] FREEZE_DETECTED at \(current, format: .fixed(precision: 2))s rate=\(rate) bufferEmpty=\(bufferEmpty) keepUp=\(keepUp) ranges=\(ranges, privacy: .public) item.error=\(itemErr, privacy: .public) lastErrorLog=\(errStr, privacy: .public)")
+                }
+                lastTime = current
+            }
+        }
+    }
+
+    /// Logs a seek event at .notice (persisted to disk in the iOS log store
+    /// for ~24h) and stamps `lastExplicitSeekAt` so the backward-jump detector
+    /// can suppress legitimate user/system seeks. The `.public` privacy hint
+    /// keeps the message readable in `log show` / sysdiagnose extracts.
+    nonisolated private func recordSeek(_ message: String) {
+        progressStateLock.lock()
+        lastExplicitSeekAt = CFAbsoluteTimeGetCurrent()
+        progressStateLock.unlock()
+        logger.notice("\(message, privacy: .public)")
+    }
+
+    /// Detects unexpected backward jumps in playback position — the signature
+    /// of bug 1 (tail replay). Called from the 1Hz UI observer on every tick.
+    /// Suppresses jumps within 1.0s of an explicit seek (legitimate user
+    /// scrub, sponsor-block skip, lock-screen scrubber). Logs at `.error` so
+    /// the event persists to disk and is recoverable via `log show` /
+    /// sysdiagnose without needing Console.app to be running at the moment.
+    nonisolated private func detectBackwardJump(current: Double) {
+        progressStateLock.lock()
+        let prev = lastTickPosition
+        let sinceSeek = CFAbsoluteTimeGetCurrent() - lastExplicitSeekAt
+        lastTickPosition = current
+        progressStateLock.unlock()
+        guard prev >= 0 else { return }
+        let delta = prev - current
+        guard delta > 0.3, sinceSeek > 1.0 else { return }
+        logger.error("[TailReplay] BACKWARD_JUMP from=\(prev, format: .fixed(precision: 2))s to=\(current, format: .fixed(precision: 2))s delta=\(delta, format: .fixed(precision: 2))s sinceLastSeek=\(sinceSeek, format: .fixed(precision: 2))s")
+    }
+
+    /// Decides whether the 30s save observer should issue a `saveProgress` POST.
+    ///
+    /// Three conditions must hold:
+    /// - `seconds` is finite and positive (defensive against NaN/negative samples)
+    /// - `rate > 0` (player is actively playing; suppresses saves during pause and
+    ///   AVPlayer's internal auto-seek-back at end-of-stream — see the comment block
+    ///   in the save observer for the bug this prevents)
+    /// - `|seconds - lastAttempted| >= 1` (debounce: skip ticks within 1s of the
+    ///   last attempted save to avoid spamming the server with sub-second updates)
+    ///
+    /// `rate > 0` is the load-bearing new check. Pause + AVPlayer auto-seek-back
+    /// both have rate==0 and would otherwise race with `handleDidPlayToEnd`'s
+    /// final-save-of-duration, often winning and storing a regressed position
+    /// (~6s before duration) on the server. NaN rate evaluates `rate > 0` as
+    /// false, which correctly classifies a not-yet-loaded player as "not playing".
+    ///
+    /// **Stall behavior** (`timeControlStatus == .waitingToPlayAtSpecifiedRate`,
+    /// e.g. buffer underrun on slow networks): rate transiently drops to 0.
+    /// The periodic time observer fires only on time advance, rate change, or
+    /// seek — during a stall, time doesn't advance, so the observer fires once
+    /// at stall-entry (rate=0, save skipped) and once at stall-exit (rate=1,
+    /// save proceeds). Saves are delayed by the stall duration but not lost:
+    /// if the user closes the app mid-stall, `stopPlayback` issues a final
+    /// save (guarded by `seconds > lastSaved + 0.5`) covering the gap.
+    ///
+    /// **Sentinel contract**: `lastAttempted == -1` is the "fresh playback"
+    /// marker set by `stopPlayback` (and the initial value of
+    /// `lastAttemptedSavePosition`). On the first tick of new playback,
+    /// `abs(seconds - (-1)) >= 1` holds for any `seconds >= 0`, so the
+    /// debounce branch reduces to "save proceeds" — desired behavior.
+    static func shouldSaveProgress(rate: Float, seconds: Double, lastAttempted: Double) -> Bool {
+        guard seconds.isFinite, seconds > 0 else { return false }
+        guard rate > 0 else { return false }
+        return abs(seconds - lastAttempted) >= 1
+    }
+
+    /// Logs codec FourCC + video dimensions for every video track on the
+    /// item. Called from item-status KVO once status==.readyToPlay so tracks
+    /// are loaded (we pass `automaticallyLoadedAssetKeys: [.tracks]`).
+    /// MainActor-isolated because `AVPlayerItemTrack.assetTrack` is a
+    /// MainActor property under Swift 6 strict concurrency.
+    @MainActor
+    private func logVideoFormat(_ item: AVPlayerItem) async {
+        let videoTracks = item.tracks.compactMap { $0.assetTrack }.filter { $0.mediaType == .video }
+        for track in videoTracks {
+            guard let descs = try? await track.load(.formatDescriptions), let desc = descs.first else { continue }
+            let fourCC = CMFormatDescriptionGetMediaSubType(desc)
+            let bytes: [UInt8] = [
+                UInt8((fourCC >> 24) & 0xff),
+                UInt8((fourCC >> 16) & 0xff),
+                UInt8((fourCC >> 8) & 0xff),
+                UInt8(fourCC & 0xff),
+            ]
+            let codec = String(decoding: bytes, as: UTF8.self)
+            let dims = CMVideoFormatDescriptionGetDimensions(desc)
+            logger.notice("[Format] video codec=\(codec, privacy: .public) dims=\(dims.width)x\(dims.height)")
+        }
     }
 
     /// Nonisolated to permit calls from the `progressQueue` time observer
@@ -590,6 +804,7 @@ final class VideoDetailViewModel {
             if currentTime >= segment.startTime && currentTime < segment.endTime && !skippedSegmentIds.contains(key) {
                 skippedSegmentIds.insert(key)
                 let seekTime = CMTime(seconds: segment.endTime, preferredTimescale: 600)
+                recordSeek("[Seek] reason=sponsorBlock category=\(segment.category.rawValue) from=\(String(format: "%.2f", currentTime))s to=\(String(format: "%.2f", segment.endTime))s")
                 player.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
                 nowPlaying?.refresh()
                 logger.info("SponsorBlock: skipped \(segment.category.rawValue) [\(String(format: "%.1f", segment.startTime))s-\(String(format: "%.1f", segment.endTime))s]")
@@ -653,6 +868,7 @@ final class VideoDetailViewModel {
 
         let seekTime = CMTime(seconds: segment.startTime, preferredTimescale: 600)
         if let player {
+            recordSeek("[Seek] reason=undoSkip category=\(segment.category.rawValue) to=\(String(format: "%.2f", segment.startTime))s")
             player.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
         }
         // For VLC, the caller handles seeking
@@ -709,6 +925,8 @@ final class VideoDetailViewModel {
         showSkipBanner = false
         skippedSegment = nil
         skippedSegmentIds.removeAll()
+        freezeWatchdogTask?.cancel()
+        freezeWatchdogTask = nil
         nowPlaying?.stop()
         nowPlaying = nil
         sessionCoordinator?.stop()
@@ -732,6 +950,10 @@ final class VideoDetailViewModel {
                 player.removeTimeObserver(observer)
                 sponsorBlockObserver = nil
             }
+            if let observer = tailObserver {
+                player.removeTimeObserver(observer)
+                tailObserver = nil
+            }
             // Snapshot the last-saved position under the lock before we reset
             // it, so the debounce check below (MainActor here, observer on
             // progressQueue) doesn't race on the scalar. `handleDidPlayToEnd`
@@ -741,6 +963,8 @@ final class VideoDetailViewModel {
             let lastSaved = lastSavedPosition
             lastSavedPosition = -1
             lastAttemptedSavePosition = -1
+            lastTickPosition = -1
+            lastExplicitSeekAt = 0
             progressStateLock.unlock()
             let seconds = player.currentTime().seconds
             if seconds.isFinite && seconds > 0 && seconds > lastSaved + 0.5 {
