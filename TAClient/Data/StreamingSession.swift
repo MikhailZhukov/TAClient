@@ -56,6 +56,10 @@ final class StreamingSession: NSObject, URLSessionDataDelegate, @unchecked Senda
         } else {
             dataContinuation?.finish()
         }
+        // Nil before invalidate: invalidate may fire didBecomeInvalidWithError
+        // synchronously, which would re-enter cleanup with self.session still set.
+        let sessionToInvalidate = self.session
         self.session = nil
+        sessionToInvalidate?.finishTasksAndInvalidate()
     }
 }

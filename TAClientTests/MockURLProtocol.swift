@@ -8,8 +8,20 @@ final class MockURLProtocol: URLProtocol {
     nonisolated(unsafe) static var lastRequest: URLRequest?
     nonisolated(unsafe) static var lastRequestBody: Data?
 
+    /// Multi-chunk slow-stream handler used by streaming tests that need to break
+    /// out of the response mid-stream. When set, takes precedence over
+    /// `requestHandler`. Each chunk is delivered to the client with a delay
+    /// between deliveries so a consumer's mid-stream cancel actually pre-empts
+    /// natural completion. Set to `nil` to disable. Cleared by `tearDown()`.
+    nonisolated(unsafe) static var slowStreamHandler: ((URLRequest) throws -> (HTTPURLResponse, [Data], TimeInterval))?
+
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    /// Tracks whether stopLoading was invoked so the slow-stream loop can bail
+    /// out promptly when the consumer cancels (URLSession calls stopLoading on
+    /// task cancel).
+    private var stopped = false
 
     override func startLoading() {
         Self.lastRequest = request
@@ -18,6 +30,29 @@ final class MockURLProtocol: URLProtocol {
             Self.lastRequestBody = Self.readStream(stream)
         } else {
             Self.lastRequestBody = request.httpBody
+        }
+
+        if let slowHandler = Self.slowStreamHandler {
+            do {
+                let (response, chunks, delay) = try slowHandler(request)
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                // Deliver chunks on a background queue with delays between them so
+                // a consumer cancellation has time to land before natural completion.
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    guard let self else { return }
+                    for chunk in chunks {
+                        if self.stopped { return }
+                        self.client?.urlProtocol(self, didLoad: chunk)
+                        Thread.sleep(forTimeInterval: delay)
+                    }
+                    // Loop's normal exit guarantees we still want to finish —
+                    // any cancel during the loop has already returned above.
+                    self.client?.urlProtocolDidFinishLoading(self)
+                }
+            } catch {
+                client?.urlProtocol(self, didFailWithError: error)
+            }
+            return
         }
 
         guard let handler = Self.requestHandler else {
@@ -35,7 +70,9 @@ final class MockURLProtocol: URLProtocol {
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        stopped = true
+    }
 
     static func readBodyStream(_ stream: InputStream) -> Data {
         readStream(stream)
@@ -117,6 +154,7 @@ enum MockResponse {
 
     static func tearDown() {
         MockURLProtocol.requestHandler = nil
+        MockURLProtocol.slowStreamHandler = nil
         MockURLProtocol.lastRequest = nil
         MockURLProtocol.lastRequestBody = nil
     }

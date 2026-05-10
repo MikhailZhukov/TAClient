@@ -48,6 +48,68 @@ extension DataLayerSuite {
         #expect(fired, "Expected .taAuthUnauthorized notification after 401 response from preloader")
     }
 
+    /// HEAD-probe branch coverage: when `startPosition > 0 && duration > 0`,
+    /// `downloadVideo` first issues a HEAD to discover Content-Length. A 401
+    /// on that HEAD must (a) post `.taAuthUnauthorized` and (b) early-return
+    /// before any GET fires. The HEAD-probe URLSession is delegate-less and
+    /// bound by `defer { headSession.finishTasksAndInvalidate() }` — the
+    /// test exercises both that early-return path and (transitively) the
+    /// defer's cleanup of the HEAD URLSession.
+    @Test func preloader_headProbeUnauthorized_postsNotification_andSkipsGet() async {
+        VideoCachePreloader.testSessionConfigurationOverride = MockResponse.makeConfiguration()
+        let url = URL(string: "https://ta.example.com/media/vid-head-401.mp4")!
+
+        // Track HEAD/GET counts so we can assert no GET fired.
+        nonisolated(unsafe) var headCount = 0
+        nonisolated(unsafe) var getCount = 0
+        MockURLProtocol.requestHandler = { request in
+            if request.httpMethod == "HEAD" {
+                headCount += 1
+                let response = HTTPURLResponse(
+                    url: url,
+                    statusCode: 401,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: nil
+                )!
+                return (response, Data())
+            }
+            getCount += 1
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            return (response, Data())
+        }
+        defer {
+            VideoCachePreloader.testSessionConfigurationOverride = nil
+            MockResponse.tearDown()
+        }
+
+        await VideoCachePreloader.shared.clear()
+
+        let videoId = "vid-head-401"
+        let expectation = NotificationExpectation(
+            name: .taAuthUnauthorized,
+            senderId: videoId
+        )
+
+        await VideoCachePreloader.shared.startPreloadWithRetry(
+            videoId: videoId,
+            url: url,
+            token: "test-token",
+            // Both > 0 so downloadVideo enters the HEAD-probe branch.
+            startPosition: 15,
+            duration: 60,
+            maxRetries: 0
+        )
+
+        let fired = await expectation.wait(timeoutSeconds: 5)
+        #expect(fired, "Expected .taAuthUnauthorized notification after HEAD-probe 401")
+        #expect(headCount >= 1, "HEAD-probe branch did not fire (preloader may have skipped HEAD)")
+        #expect(getCount == 0, "GET must not run after HEAD-probe 401 — early return is the contract")
+        #expect(
+            await VideoCachePreloader.shared.cacheStatus(videoId: videoId) == nil,
+            "no cache entry should be seeded when HEAD returns 401"
+        )
+    }
+
     @Test func videoCacheDownload_on403_postsUnauthorizedNotification() async {
         VideoCachePreloader.testSessionConfigurationOverride = MockResponse.makeConfiguration()
         MockResponse.setUp(statusCode: 403, data: Data())

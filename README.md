@@ -81,6 +81,7 @@ Tube Archivist is excellent at archiving your YouTube library on a server you co
 - Watch-progress sync — every 10 seconds, plus on pause and on completion
 - **SponsorBlock** — automatic skip of sponsor segments with per-category toggles and undo
 - Background audio + lock-screen controls (play / pause / skip / seek / artwork)
+- Picture-in-Picture playback, including auto-PiP from inline when the app goes to background
 - AirPlay routing
 - **Share Extension** — add YouTube videos to the download queue from any Share sheet
 - Download queue management — add, prioritize, ignore, delete, kick off downloads

@@ -35,6 +35,21 @@ extension DataLayerSuite {
         return Data(bytes)
     }
 
+    /// Generic async poller: invoke `predicate` every 20 ms until it returns
+    /// `true` or the timeout elapses. Returns the final predicate result.
+    private static func pollUntil(
+        timeoutSeconds: Double = 5,
+        _ predicate: @Sendable () async -> Bool
+    ) async -> Bool {
+        let step: UInt64 = 20_000_000 // 20 ms
+        let iterations = Int((timeoutSeconds * 1_000_000_000) / Double(step))
+        for _ in 0..<iterations {
+            if await predicate() { return true }
+            try? await Task.sleep(nanoseconds: step)
+        }
+        return false
+    }
+
     /// Poll the cache until preload finishes (cachedByteCount >= expected) or
     /// the timeout elapses. Returns `true` iff the cache reached the target
     /// size before the timeout.
@@ -43,18 +58,12 @@ extension DataLayerSuite {
         expectedBytes: Int,
         timeoutSeconds: Double = 5
     ) async -> Bool {
-        let step: UInt64 = 20_000_000 // 20 ms
-        let iterations = Int((timeoutSeconds * 1_000_000_000) / Double(step))
-        for _ in 0..<iterations {
-            if let status = await VideoCachePreloader.shared.cacheStatus(videoId: videoId) {
-                let cachedBytes = Int(status.endOffset - status.startOffset)
-                if cachedBytes >= expectedBytes {
-                    return true
-                }
+        await pollUntil(timeoutSeconds: timeoutSeconds) {
+            guard let status = await VideoCachePreloader.shared.cacheStatus(videoId: videoId) else {
+                return false
             }
-            try? await Task.sleep(nanoseconds: step)
+            return Int(status.endOffset - status.startOffset) >= expectedBytes
         }
-        return false
     }
 
     /// Configure the shared singleton to use MockURLProtocol and serve a
@@ -367,6 +376,89 @@ extension DataLayerSuite {
             length: 64
         )
         #expect(wrongId == nil)
+
+        await VideoCachePreloader.shared.clear()
+    }
+
+    /// Behavioural coverage for the HEAD-probe branch in `downloadVideo`
+    /// (`startPosition > 0 && duration > 0`). Asserts that:
+    /// 1. the GET request that follows the HEAD probe carries a `Range:`
+    ///    header derived from the HEAD response's `Content-Length` and the
+    ///    position fraction — proves the HEAD URLSession ran and supplied
+    ///    `knownTotalSize`;
+    /// 2. the resulting cache entry is stored at `startOffset == byteOffset`
+    ///    — locks against a regression where the offset is computed for the
+    ///    request but the entry is seeded at the wrong offset.
+    @Test func preloader_headProbe_seeksByPositionFraction() async {
+        let payloadSize = 200 * 1024 // 200 KB
+        VideoCachePreloader.testSessionConfigurationOverride = MockResponse.makeConfiguration()
+        let url = URL(string: "https://ta.example.com/media/vid-head.mp4")!
+
+        // HEAD returns Content-Length only; GET responds 206 with empty body
+        // (the test only inspects the request, not the cached bytes).
+        MockURLProtocol.requestHandler = { request in
+            if request.httpMethod == "HEAD" {
+                let response = HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: [
+                        "Content-Type": "video/mp4",
+                        "Content-Length": "\(payloadSize)"
+                    ]
+                )!
+                return (response, Data())
+            }
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 206,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Type": "video/mp4",
+                    "Content-Range": "bytes 51200-\(payloadSize - 1)/\(payloadSize)"
+                ]
+            )!
+            return (response, Data())
+        }
+        defer {
+            VideoCachePreloader.testSessionConfigurationOverride = nil
+            MockResponse.tearDown()
+        }
+
+        await VideoCachePreloader.shared.clear()
+
+        // 25 % of 60 s -> byteOffset = 200 KB * 0.25 = 51200.
+        let videoId = "vid-head"
+        await VideoCachePreloader.shared.startPreloadWithRetry(
+            videoId: videoId,
+            url: url,
+            token: "test-token",
+            startPosition: 15,
+            duration: 60,
+            maxRetries: 0
+        )
+
+        // Poll briefly: startPreloadWithRetry returns before the download
+        // Task finishes setting lastRequest and seeding the cache entry.
+        _ = await Self.pollUntil(timeoutSeconds: 2) {
+            guard let last = MockURLProtocol.lastRequest,
+                  last.httpMethod != "HEAD",
+                  last.value(forHTTPHeaderField: "Range") != nil else {
+                return false
+            }
+            return await VideoCachePreloader.shared.cacheStatus(videoId: videoId) != nil
+        }
+
+        let rangeHeader = MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "Range")
+        #expect(rangeHeader == "bytes=51200-",
+                "expected Range header derived from HEAD-supplied Content-Length × (15/60); got \(rangeHeader ?? "nil")")
+
+        // Locks the seek-stored-at-wrong-offset regression: a refactor that
+        // computes `byteOffset` for the request but passes 0 to `setEntry`
+        // would still pass the Range-header assertion above.
+        let status = await VideoCachePreloader.shared.cacheStatus(videoId: videoId)
+        #expect(status?.startOffset == 51200,
+                "expected cache entry seeded at the HEAD-derived offset; got \(status?.startOffset.description ?? "nil")")
 
         await VideoCachePreloader.shared.clear()
     }

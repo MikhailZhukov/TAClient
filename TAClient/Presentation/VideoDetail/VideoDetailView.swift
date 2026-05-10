@@ -346,6 +346,8 @@ struct AVPlayerView: UIViewControllerRepresentable {
         controller.player = player
         controller.delegate = context.coordinator
         controller.allowsPictureInPicturePlayback = true
+        controller.canStartPictureInPictureAutomaticallyFromInline = true
+        Self.applyPlayerConfig(player)
         if let item = player.currentItem {
             context.coordinator.observeEnd(of: item, playerVC: controller)
         }
@@ -369,10 +371,22 @@ struct AVPlayerView: UIViewControllerRepresentable {
         context.coordinator.doubleTapRecognizer?.isEnabled = onDoubleTap != nil
         if controller.player !== player {
             controller.player = player
+            Self.applyPlayerConfig(player)
             if let item = player.currentItem {
                 context.coordinator.observeEnd(of: item, playerVC: controller)
             }
         }
+    }
+
+    /// Applies player-level config that must travel with the player on every
+    /// swap. `audiovisualBackgroundPlaybackPolicy = .continuesIfPossible` is
+    /// load-bearing for background audio (without it iOS suspends the app
+    /// within ~5s when it goes to background); applying it only in
+    /// `makeUIViewController` would silently regress when the underlying
+    /// `AVPlayer` is replaced via `updateUIViewController`. Centralised here
+    /// so both paths stay in sync.
+    private static func applyPlayerConfig(_ player: AVPlayer) {
+        player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
     }
 
     class Coordinator: NSObject, AVPlayerViewControllerDelegate, UIGestureRecognizerDelegate {
@@ -382,7 +396,36 @@ struct AVPlayerView: UIViewControllerRepresentable {
         var onDoubleTap: ((_ forward: Bool) -> Void)?
         weak var doubleTapRecognizer: UITapGestureRecognizer?
         private var endObserver: Any?
+        private var timeJumpObserver: Any?
+        /// KVO on `AVPlayer.currentItem` so we self-rewire `endObserver` /
+        /// `timeJumpObserver` when the VM swaps the item via
+        /// `replaceCurrentItem(with:)` (e.g. AirPlay handoff). Without this,
+        /// the per-item observers stay bound to the discarded item, the
+        /// end-of-stream notification fires for an object no observer is
+        /// listening to, and `didPlayToEnd` is silently never set on the new
+        /// item — re-introducing the tail-replay bug after AirPlay swap.
+        private var currentItemObserver: NSKeyValueObservation?
         private weak var playerVC: AVPlayerViewController?
+        /// True once AVPlayerItemDidPlayToEndTime fires for the current item.
+        /// Reset to false when a new item is observed in `observeEnd(of:playerVC:)`,
+        /// and also when the user seeks the same item meaningfully back from end
+        /// (e.g. taps the system Replay button — captured via `timeJumpedNotification`).
+        /// Read by `shouldClampToEnd(...)` in the fullscreen-exit completion to override
+        /// AVKit's internal seek-back-for-Replay drift at end-of-stream.
+        ///
+        /// Without the time-jump reset, this scenario would mis-clamp:
+        /// 1. Video plays to end → `didPlayToEnd = true` and player pauses at duration.
+        /// 2. User taps Replay → AVKit seeks to 0 and resumes; same `AVPlayerItem`,
+        ///    so `observeEnd` is NOT called again.
+        /// 3. User pauses mid-replay, exits fullscreen → status == .paused and
+        ///    `didPlayToEnd` is still stale-true → predicate fires and
+        ///    `seek(to: duration)` jumps the user to end-of-video.
+        private var didPlayToEnd: Bool = false
+
+        private static let nearEndWindow: Double = 0.5
+        private static let endFlagClearThreshold: Double = 1.0
+        private static let reclampDelay: TimeInterval = 0.15
+        private static let reclampDriftTolerance: Double = 0.5
 
         init(isFullScreen: Binding<Bool>, isPiPActive: Binding<Bool>, onPiPStopped: (() -> Void)?, onDoubleTap: ((_ forward: Bool) -> Void)?) {
             self.isFullScreen = isFullScreen
@@ -409,8 +452,64 @@ struct AVPlayerView: UIViewControllerRepresentable {
         ) -> Bool {
             guard wasPlaying else { return false }
             guard status == .playing else { return false }
-            let nearEnd = duration > 0 && currentTime >= duration - 0.5
+            let nearEnd = duration > 0 && currentTime >= duration - Self.nearEndWindow
             return !nearEnd
+        }
+
+        /// Decides whether to force-seek the player to exact duration after fullscreen exit.
+        ///
+        /// AVKit internally seeks the AVPlayerItem back ~3-7 seconds at end-of-stream to
+        /// prepare its system "Replay" button. This is undocumented but reproducible.
+        /// When fullscreen exits at the same moment, the player is left resting at the
+        /// seeked-back position rather than at duration — visually showing a frame from
+        /// 4-7 seconds before the actual end. This helper signals when the post-animation
+        /// completion should re-seek to exact duration to override AVKit's seek-back.
+        ///
+        /// Uses `didPlayToEnd` (set by AVPlayerItemDidPlayToEndTime observer) rather than a
+        /// position threshold because AVKit's seek-back may already have moved currentTime
+        /// to duration-7s by the time this predicate is evaluated. The notification is
+        /// the canonical end-of-stream signal.
+        ///
+        /// Mutually exclusive with `shouldResumePlayback`:
+        /// - status == .playing → caller takes the resume path (legitimate mid-playback)
+        /// - status == .paused AND didPlayToEnd → caller takes the clamp path (this helper)
+        static func shouldClampToEnd(
+            didPlayToEnd: Bool,
+            duration: Double,
+            status: AVPlayer.TimeControlStatus
+        ) -> Bool {
+            guard didPlayToEnd else { return false }
+            guard duration.isFinite, duration > 0 else { return false }
+            guard status == .paused else { return false }
+            return true
+        }
+
+        /// Decides whether an `AVPlayerItem.timeJumpedNotification` should clear
+        /// the stale `didPlayToEnd` flag. Distinguishes the two seek-back
+        /// patterns that both fire `timeJumpedNotification` after end-of-stream:
+        ///
+        /// - User taps the system **Replay** button → AVKit seeks the same item
+        ///   back to position ~0 and resumes. We MUST clear the flag, otherwise
+        ///   the next pause-then-fullscreen-exit cycle would see stale-true
+        ///   `didPlayToEnd` and mis-clamp the user back to duration.
+        /// - AVKit's internal **seek-back-for-Replay** affordance (undocumented)
+        ///   drifts position back ~3-7s from `duration` to a previous keyframe
+        ///   so the system Replay button has somewhere to start from. We MUST
+        ///   keep the flag set, since this is exactly the path
+        ///   `shouldClampToEnd` exists to override.
+        ///
+        /// Production logs (2026-05-09 iPad capture) measured AVKit drift
+        /// deltas of 4.22s and 7.54s. The Replay button always seeks to ~0.
+        /// A near-zero threshold (`< 1.0s` from the start of the item) cleanly
+        /// separates the two: the Replay path lands at 0; the AVKit drift path
+        /// lands far from 0 on any video longer than ~10 seconds.
+        ///
+        /// Returns false for non-finite or non-positive `duration` (item not
+        /// loaded / live stream / nonsensical) and for non-finite `currentTime`,
+        /// matching the `shouldClampToEnd` defensive shape.
+        static func shouldClearEndFlag(currentTime: Double, duration: Double) -> Bool {
+            guard duration.isFinite, duration > 0, currentTime.isFinite else { return false }
+            return currentTime < Self.endFlagClearThreshold
         }
 
         @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
@@ -427,17 +526,65 @@ struct AVPlayerView: UIViewControllerRepresentable {
             true
         }
 
+        // INVARIANT: The Coordinator self-rewires its end / timeJumped observers
+        // when `AVPlayer.currentItem` changes via KVO — so this is safe across
+        // AirPlay-driven `replaceCurrentItem(with:)` swaps performed by
+        // `VideoDetailViewModel.handleAirPlayBecameActive` and any future
+        // mid-session item swaps on the same player. The KVO observation is
+        // installed below (`currentItemObserver`) and torn down in `deinit`.
+        // The codebase still defaults to one AVPlayer per video (per CLAUDE.md
+        // "ViewModel lifecycle in NavigationStack"); the KVO is a defence-in-
+        // depth measure for the AirPlay path and any future swap sites.
         func observeEnd(of playerItem: AVPlayerItem, playerVC: AVPlayerViewController) {
             self.playerVC = playerVC
+            self.didPlayToEnd = false
             endObserver.map { NotificationCenter.default.removeObserver($0) }
+            timeJumpObserver.map { NotificationCenter.default.removeObserver($0) }
+            // Rebind the currentItem KVO every call so it tracks the latest
+            // playerVC (callers may pass a different controller on later
+            // invocations). Always invalidate before re-installing — otherwise
+            // multiple KVOs would all fire on swap and re-invoke observeEnd
+            // N times, leaking observer registrations.
+            currentItemObserver?.invalidate()
+            if let player = playerVC.player {
+                currentItemObserver = player.observe(\.currentItem, options: [.new]) { [weak self, weak playerVC] _, change in
+                    guard let self,
+                          let playerVC,
+                          let newItem = change.newValue ?? nil else { return }
+                    // Re-entrancy: observeEnd will reset `didPlayToEnd`,
+                    // re-bind `endObserver` / `timeJumpObserver` to `newItem`,
+                    // and re-install this KVO. Safe — invalidation is the
+                    // first step inside `observeEnd`.
+                    self.observeEnd(of: newItem, playerVC: playerVC)
+                }
+            }
             endObserver = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemDidPlayToEndTime,
                 object: playerItem,
                 queue: .main
             ) { [weak self] _ in
-                guard let self, let vc = self.playerVC else { return }
-                if vc.presentedViewController != nil || vc.isBeingPresented {
+                guard let self else { return }
+                self.didPlayToEnd = true
+                if let vc = self.playerVC,
+                   vc.presentedViewController != nil || vc.isBeingPresented {
                     vc.dismiss(animated: true)
+                }
+            }
+            // Clear the stale-end-flag when the user seeks meaningfully back
+            // from the end of the same item (e.g. system "Replay" button after
+            // a natural play-to-end). Without this, a Replay-then-pause-then-
+            // fullscreen-exit cycle would still see `didPlayToEnd == true` and
+            // mis-clamp the user to duration.
+            timeJumpObserver = NotificationCenter.default.addObserver(
+                forName: AVPlayerItem.timeJumpedNotification,
+                object: playerItem,
+                queue: .main
+            ) { [weak self, weak playerItem] _ in
+                guard let self, let item = playerItem, self.didPlayToEnd else { return }
+                let duration = item.duration.seconds
+                let now = item.currentTime().seconds
+                if Coordinator.shouldClearEndFlag(currentTime: now, duration: duration) {
+                    self.didPlayToEnd = false
                 }
             }
         }
@@ -465,15 +612,52 @@ struct AVPlayerView: UIViewControllerRepresentable {
             coordinator.animate(alongsideTransition: nil) { [self] _ in
                 isFullScreen.wrappedValue = false
                 let player = playerViewController.player
+                let item = player?.currentItem
+                let duration = item?.duration.seconds ?? 0
+                let status = player?.timeControlStatus ?? .paused
+                let currentTime = player?.currentTime().seconds ?? 0
+
                 let shouldResume = Coordinator.shouldResumePlayback(
                     wasPlaying: wasPlaying,
-                    status: player?.timeControlStatus ?? .paused,
-                    currentTime: player?.currentTime().seconds ?? 0,
-                    duration: player?.currentItem?.duration.seconds ?? 0
+                    status: status,
+                    currentTime: currentTime,
+                    duration: duration
                 )
+                let shouldClamp = Coordinator.shouldClampToEnd(
+                    didPlayToEnd: didPlayToEnd,
+                    duration: duration,
+                    status: status
+                )
+
                 if shouldResume {
                     viewLogger.notice("[Fullscreen] resumePlay-after-exit")
                     player?.play()
+                } else if shouldClamp, let itemDuration = item?.duration {
+                    viewLogger.notice("[Fullscreen] clampToEnd-after-exit duration=\(String(format: "%.2f", duration))s")
+                    player?.seek(to: itemDuration, toleranceBefore: .zero, toleranceAfter: .zero)
+                    // Race mitigation: AVKit's internal seek-back may fire AFTER our seek.
+                    // Re-clamp once after a short delay; cheap no-op if our first seek won.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Coordinator.reclampDelay) { [weak player, weak item] in
+                        guard let player, let item else { return }
+                        // Defend against the AVPlayerItem being swapped out from
+                        // under us during the 150ms delay (e.g. another video
+                        // load races the dismissal). Seeking a stale item is
+                        // a no-op at best, but seeking the *new* item to the
+                        // *old* item's duration would be actively wrong.
+                        guard player.currentItem === item else { return }
+                        let duration2 = item.duration
+                        // CMTime.zero is `.isNumeric == true`, so the original
+                        // guard would let `seek(to: .zero)` through if duration
+                        // collapsed to zero between the first seek and the
+                        // re-clamp. Require a positive duration explicitly.
+                        guard duration2.isNumeric, duration2.seconds > 0,
+                              player.timeControlStatus == .paused else { return }
+                        let now = player.currentTime()
+                        let driftedAway = abs(now.seconds - duration2.seconds) > Coordinator.reclampDriftTolerance
+                        if driftedAway {
+                            player.seek(to: duration2, toleranceBefore: .zero, toleranceAfter: .zero)
+                        }
+                    }
                 }
             }
         }
@@ -502,6 +686,8 @@ struct AVPlayerView: UIViewControllerRepresentable {
 
         deinit {
             endObserver.map { NotificationCenter.default.removeObserver($0) }
+            timeJumpObserver.map { NotificationCenter.default.removeObserver($0) }
+            currentItemObserver?.invalidate()
         }
     }
 }

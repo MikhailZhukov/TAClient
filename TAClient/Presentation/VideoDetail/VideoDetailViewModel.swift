@@ -76,7 +76,18 @@ final class VideoDetailViewModel {
     /// reason). The backward-jump detector ignores jumps that happen within
     /// 1s of an explicit seek — those are intentional, not a replay bug.
     @ObservationIgnored
-    nonisolated(unsafe) private var lastExplicitSeekAt: CFAbsoluteTime = 0
+    nonisolated(unsafe) private var lastExplicitSeekAt: CFAbsoluteTime = VideoDetailViewModel.resetExplicitSeekTimestamp()
+
+    /// Reset value for `lastExplicitSeekAt` on `stopPlayback()` paths. Returns
+    /// `CFAbsoluteTimeGetCurrent()` — never `0` (which corresponds to the
+    /// CFAbsoluteTime epoch 2001-01-01 and produces a bogus
+    /// `[TailReplay] sinceLastSeek=800005224.34s` ~25-year diagnostic skew).
+    /// Extracted as a static helper so the contract is testable without
+    /// having to wire a real `AVPlayer` into a VM SUT just to drive
+    /// `stopPlayback`'s `if let player` branch.
+    nonisolated static func resetExplicitSeekTimestamp() -> CFAbsoluteTime {
+        CFAbsoluteTimeGetCurrent()
+    }
     /// Serialises access to the two scalars above across the MainActor ⇄
     /// `progressQueue` boundary. Cheap — only taken around trivial reads/
     /// writes on the periodic observers' hot path.
@@ -964,7 +975,13 @@ final class VideoDetailViewModel {
             lastSavedPosition = -1
             lastAttemptedSavePosition = -1
             lastTickPosition = -1
-            lastExplicitSeekAt = 0
+            // Match the init-time default: fresh "now" rather than `0`. Otherwise
+            // a stop→re-start cycle on the same VM re-introduces the cosmetic
+            // 25-year `[TailReplay] sinceLastSeek=...` skew until the next
+            // explicit seek records a new timestamp. Helper is a one-line
+            // wrapper so the contract is unit-testable without needing to
+            // wire a real `AVPlayer` into a VM SUT.
+            lastExplicitSeekAt = Self.resetExplicitSeekTimestamp()
             progressStateLock.unlock()
             let seconds = player.currentTime().seconds
             if seconds.isFinite && seconds > 0 && seconds > lastSaved + 0.5 {

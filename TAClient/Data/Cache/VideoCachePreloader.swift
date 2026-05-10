@@ -149,6 +149,7 @@ actor VideoCachePreloader {
             headRequest.setValue("Token \(token)", forHTTPHeaderField: "Authorization")
 
             let headSession = URLSession(configuration: config)
+            defer { headSession.finishTasksAndInvalidate() }
             if let (_, headResponse) = try? await headSession.data(for: headRequest),
                let http = headResponse as? HTTPURLResponse {
                 if http.statusCode == 401 || http.statusCode == 403 {
