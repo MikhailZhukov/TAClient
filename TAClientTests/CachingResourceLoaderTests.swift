@@ -135,13 +135,15 @@ extension DataLayerSuite {
         let store = CacheStore()
         let videoId = "vid-sync-hit"
         let payload = Data(repeating: 0xEE, count: 64 * 1024) // 64 KB
+        // Small payload (64 KB) is well below the prefix lower bound (8 MB),
+        // so `setEntry` creates only a `.prefix` region — write goes there.
         store.setEntry(
             videoId: videoId,
-            startOffset: 0,
             totalSize: Int64(payload.count),
-            contentType: "video/mp4"
+            contentType: "video/mp4",
+            resumeByte: 0
         )
-        _ = store.writeChunk(videoId: videoId, chunk: payload)
+        _ = store.writeChunk(videoId: videoId, toRegion: .prefix, chunk: payload)
 
         let loader = CachingResourceLoader(
             videoId: videoId,
@@ -216,17 +218,20 @@ extension DataLayerSuite {
         let store = CacheStore()
         let videoId = "vid-dedup"
         let totalSize: Int64 = 50 * 1024 * 1024 // 50 MB plenty
+        // 50 MB > prefixSize (8 MB) → both regions; main starts at 8 MB.
+        // The dedup test cares about the file head (byte 0..1.5 MB), so we
+        // write into `.prefix` and the request also lands inside it.
         store.setEntry(
             videoId: videoId,
-            startOffset: 0,
             totalSize: totalSize,
-            contentType: "video/mp4"
+            contentType: "video/mp4",
+            resumeByte: 0
         )
-        // Seed 2 × 512 KB chunks — endOffset = 1 MB. Request at 1.5 MB lands
-        // inside the next (soon-to-be-written) chunk range.
+        // Seed 2 × 512 KB chunks — prefix endOffset = 1 MB. Request at 1.5 MB
+        // lands inside the next (soon-to-be-written) chunk range.
         let seedChunk = Data(repeating: 0xAA, count: CacheStore.chunkSize)
-        _ = store.writeChunk(videoId: videoId, chunk: seedChunk)
-        _ = store.writeChunk(videoId: videoId, chunk: seedChunk)
+        _ = store.writeChunk(videoId: videoId, toRegion: .prefix, chunk: seedChunk)
+        _ = store.writeChunk(videoId: videoId, toRegion: .prefix, chunk: seedChunk)
 
         let requestOffset: Int64 = Int64(CacheStore.chunkSize) * 3  // chunk index 3 (1.5 MB)
         let requestLength = 64 * 1024 // 64 KB — inside the chunk we'll write
@@ -240,8 +245,8 @@ extension DataLayerSuite {
             let catchUpChunk = Data(repeating: 0xBB, count: CacheStore.chunkSize)
             // Write chunk index 2 and chunk index 3 (so requestOffset at
             // index 3 is covered).
-            _ = storeRef.writeChunk(videoId: videoId, chunk: catchUpChunk)
-            _ = storeRef.writeChunk(videoId: videoId, chunk: catchUpChunk)
+            _ = storeRef.writeChunk(videoId: videoId, toRegion: .prefix, chunk: catchUpChunk)
+            _ = storeRef.writeChunk(videoId: videoId, toRegion: .prefix, chunk: catchUpChunk)
         }
 
         // Inject the loader with a deterministic `isPreloadingCheck` closure
@@ -273,11 +278,11 @@ extension DataLayerSuite {
         let videoId = "vid-no-preload"
         store.setEntry(
             videoId: videoId,
-            startOffset: 0,
             totalSize: 10 * 1024 * 1024,
-            contentType: "video/mp4"
+            contentType: "video/mp4",
+            resumeByte: 0
         )
-        _ = store.writeChunk(videoId: videoId, chunk: Data(repeating: 0xCC, count: 1024))
+        _ = store.writeChunk(videoId: videoId, toRegion: .prefix, chunk: Data(repeating: 0xCC, count: 1024))
 
         let loader = CachingResourceLoader(
             videoId: videoId,
@@ -303,11 +308,11 @@ extension DataLayerSuite {
         let videoId = "vid-far-ahead"
         store.setEntry(
             videoId: videoId,
-            startOffset: 0,
             totalSize: 100 * 1024 * 1024,
-            contentType: "video/mp4"
+            contentType: "video/mp4",
+            resumeByte: 0
         )
-        _ = store.writeChunk(videoId: videoId, chunk: Data(repeating: 0xDD, count: 1024))
+        _ = store.writeChunk(videoId: videoId, toRegion: .prefix, chunk: Data(repeating: 0xDD, count: 1024))
 
         let loader = CachingResourceLoader(
             videoId: videoId,
@@ -335,11 +340,11 @@ extension DataLayerSuite {
         let videoId = "vid-slow-preload"
         store.setEntry(
             videoId: videoId,
-            startOffset: 0,
             totalSize: 10 * 1024 * 1024,
-            contentType: "video/mp4"
+            contentType: "video/mp4",
+            resumeByte: 0
         )
-        _ = store.writeChunk(videoId: videoId, chunk: Data(repeating: 0xEE, count: 1024))
+        _ = store.writeChunk(videoId: videoId, toRegion: .prefix, chunk: Data(repeating: 0xEE, count: 1024))
 
         let loader = CachingResourceLoader(
             videoId: videoId,
@@ -354,6 +359,272 @@ extension DataLayerSuite {
         // simulated preloader never writes more data during the grace loop.
         let data = await loader.waitForPreloaderData(offset: 2048, length: 1024)
         #expect(data == nil, "Must return nil after grace attempts exhausted so caller falls through to network")
+    }
+
+    // MARK: - Region-aware serving (Task 4 of prefix-cache-region plan)
+
+    /// Two regions seeded; offset falls inside the prefix range. The loader's
+    /// hot-read path (`store.readData`) must return prefix data without any
+    /// network involvement. `AVAssetResourceLoadingDataRequest` has no public
+    /// initializer, so we verify the contract one layer down — the same
+    /// pattern used by `cacheHit_readsSynchronously_fromInjectedStore`.
+    @Test func serveRequest_offsetInPrefix_servedFromPrefix() {
+        let store = CacheStore()
+        let videoId = "vid-prefix-hit"
+        // 50 MB total → prefixSize = 8 MB (lower bound), main starts at 8 MB.
+        let totalSize: Int64 = 50 * 1024 * 1024
+        store.setEntry(
+            videoId: videoId,
+            totalSize: totalSize,
+            contentType: "video/mp4",
+            resumeByte: 16 * 1024 * 1024 // resume at 16 MB — well past prefix end
+        )
+        let prefixByte: UInt8 = 0x11
+        let prefixChunk = Data(repeating: prefixByte, count: CacheStore.chunkSize)
+        // Write 4 × 512 KB into prefix → endOffset 2 MB.
+        for _ in 0..<4 {
+            _ = store.writeChunk(videoId: videoId, toRegion: .prefix, chunk: prefixChunk)
+        }
+        // Also write into main so we can confirm reads at prefix-range offsets
+        // come from the prefix bytes (not from main, which starts at 16 MB).
+        let mainByte: UInt8 = 0x22
+        let mainChunk = Data(repeating: mainByte, count: CacheStore.chunkSize)
+        _ = store.writeChunk(videoId: videoId, toRegion: .main, chunk: mainChunk)
+
+        let loader = CachingResourceLoader(
+            videoId: videoId,
+            originalURL: URL(string: "https://ta.example.com/media/vid-prefix-hit.mp4")!,
+            token: "test-token",
+            store: store
+        )
+
+        // Request at 1 MB — inside prefix range, deep enough that one chunk's
+        // worth (`length = 64 KB`) stays inside a single prefix chunk.
+        let data = loader.store.readData(videoId: videoId, offset: 1 * 1024 * 1024, length: 64 * 1024)
+        #expect(data != nil)
+        #expect(data?.count == 64 * 1024)
+        #expect(data?.first == prefixByte, "Read at prefix-range offset must return prefix bytes (0x11), not main bytes (0x22)")
+    }
+
+    /// Two regions seeded; offset falls in the main range. Reads return main
+    /// region bytes.
+    @Test func serveRequest_offsetInMain_servedFromMain() {
+        let store = CacheStore()
+        let videoId = "vid-main-hit"
+        let totalSize: Int64 = 100 * 1024 * 1024 // 100 MB → prefixSize = 8 MB
+        let mainStart: Int64 = 20 * 1024 * 1024 // resume at 20 MB → main starts there
+        store.setEntry(
+            videoId: videoId,
+            totalSize: totalSize,
+            contentType: "video/mp4",
+            resumeByte: mainStart
+        )
+
+        let prefixByte: UInt8 = 0x33
+        _ = store.writeChunk(videoId: videoId, toRegion: .prefix, chunk: Data(repeating: prefixByte, count: CacheStore.chunkSize))
+
+        let mainByte: UInt8 = 0x44
+        // Write a few main chunks starting at byte 20 MB.
+        for _ in 0..<4 {
+            _ = store.writeChunk(videoId: videoId, toRegion: .main, chunk: Data(repeating: mainByte, count: CacheStore.chunkSize))
+        }
+
+        let loader = CachingResourceLoader(
+            videoId: videoId,
+            originalURL: URL(string: "https://ta.example.com/media/vid-main-hit.mp4")!,
+            token: "test-token",
+            store: store
+        )
+
+        // Request inside main range — byte 21 MB (= mainStart + 1 MB).
+        let offset: Int64 = mainStart + 1 * 1024 * 1024
+        let data = loader.store.readData(videoId: videoId, offset: offset, length: 64 * 1024)
+        #expect(data != nil)
+        #expect(data?.count == 64 * 1024)
+        #expect(data?.first == mainByte, "Read at main-range offset must return main bytes (0x44), not prefix bytes (0x33)")
+    }
+
+    /// Request straddles the prefix-region boundary. `CacheStore.readData`
+    /// truncates the response to bytes available in the matched region (prefix
+    /// in this case). The loader's `fillDataRequest` loop then issues a
+    /// follow-up read for the remainder — verified here by reading the
+    /// short response and confirming it matches prefix bytes only.
+    ///
+    /// AVAssetResourceLoadingDataRequest internally tracks `requestedLength`
+    /// vs `currentOffset` — when `respond(with:)` is called with fewer bytes
+    /// than requested, the framework re-issues by advancing `currentOffset`.
+    /// Apple's `AVAssetResourceLoaderDelegate` documentation explicitly calls
+    /// out that the delegate may respond with less than `requestedLength` and
+    /// the framework will call back for more. So a short response is the
+    /// supported partial-response contract.
+    @Test func serveRequest_crossesBoundary_partialFromPrefix() {
+        let store = CacheStore()
+        let videoId = "vid-boundary"
+        let totalSize: Int64 = 50 * 1024 * 1024
+        store.setEntry(
+            videoId: videoId,
+            totalSize: totalSize,
+            contentType: "video/mp4",
+            resumeByte: 16 * 1024 * 1024
+        )
+        // Write a known number of prefix chunks (4 × 512 KB = 2 MB) so we
+        // can reason about the prefix endOffset exactly. The prefix region's
+        // *capacity* is the dynamic prefixSize (8 MB lower bound), but we
+        // only need to fill enough to span the request range and have a
+        // clean known boundary at `prefixEnd`.
+        let prefixByte: UInt8 = 0x55
+        let prefixChunkCount = 4
+        for _ in 0..<prefixChunkCount {
+            _ = store.writeChunk(videoId: videoId, toRegion: .prefix, chunk: Data(repeating: prefixByte, count: CacheStore.chunkSize))
+        }
+        let prefixEnd: Int64 = Int64(prefixChunkCount * CacheStore.chunkSize)  // exact: 4 × 512 KB = 2 MB
+        // Write some main bytes (but they're at byte 16 MB, not adjacent to
+        // prefix end at 2 MB, so the gap [2 MB .. 16 MB) is uncovered).
+        _ = store.writeChunk(videoId: videoId, toRegion: .main, chunk: Data(repeating: 0x66, count: CacheStore.chunkSize))
+
+        let loader = CachingResourceLoader(
+            videoId: videoId,
+            originalURL: URL(string: "https://ta.example.com/media/vid-boundary.mp4")!,
+            token: "test-token",
+            store: store
+        )
+
+        // Request 1 MB starting 256 KB before the prefix end (byte 2 MB).
+        // Available in prefix: 256 KB. The request asks for 1 MB but only the
+        // first 256 KB are inside the prefix region.
+        let partialBytes = 256 * 1024
+        let offset: Int64 = prefixEnd - Int64(partialBytes)
+        let requestLength = 1 * 1024 * 1024  // 1 MB
+        let data = loader.store.readData(videoId: videoId, offset: offset, length: requestLength)
+
+        #expect(data != nil)
+        // Must be SHORTER than requestLength — only the bytes inside prefix.
+        #expect(data!.count == partialBytes, "Short response: only the 256 KB inside prefix range. AVPlayer issues a follow-up for the remainder.")
+        #expect(data?.first == prefixByte)
+        #expect(data?.last == prefixByte, "All returned bytes must be from prefix region (0x55)")
+    }
+
+    /// Both regions seeded but neither covers the requested offset (offset in
+    /// the gap between prefix end and main start). The store returns `nil`,
+    /// the dedup grace path also returns `nil` (offset is too far past prefix
+    /// end), and the loader's `fillDataRequest` falls through to network. We
+    /// exercise the store-miss / waitForPreloaderData-nil contract here; the
+    /// full network-fallback path requires an `AVAssetResourceLoadingRequest`
+    /// which has no public initializer.
+    @Test func serveRequest_neitherRegionCovers_fallsToNetwork() async {
+        let store = CacheStore()
+        let videoId = "vid-gap"
+        let totalSize: Int64 = 100 * 1024 * 1024 // 100 MB → prefix = 8 MB
+        let mainStart: Int64 = 50 * 1024 * 1024  // huge gap [8 MB .. 50 MB)
+        store.setEntry(
+            videoId: videoId,
+            totalSize: totalSize,
+            contentType: "video/mp4",
+            resumeByte: mainStart
+        )
+        _ = store.writeChunk(videoId: videoId, toRegion: .prefix, chunk: Data(repeating: 0x77, count: CacheStore.chunkSize))
+        _ = store.writeChunk(videoId: videoId, toRegion: .main, chunk: Data(repeating: 0x88, count: CacheStore.chunkSize))
+
+        let loader = CachingResourceLoader(
+            videoId: videoId,
+            originalURL: URL(string: "https://ta.example.com/media/vid-gap.mp4")!,
+            token: "test-token",
+            store: store,
+            isPreloadingCheck: { _ in true },
+            graceSleep: { _ in /* instant */ }
+        )
+
+        // Request at 30 MB — in the gap, no region covers it.
+        let offset: Int64 = 30 * 1024 * 1024
+
+        // Direct cache read returns nil.
+        let cacheData = loader.store.readData(videoId: videoId, offset: offset, length: 1024)
+        #expect(cacheData == nil)
+
+        // The grace path also returns nil because:
+        //   - prefix.endOffset = 512 KB → distance to 30 MB is way past coverSoonWindow
+        //   - main.endOffset = mainStart + 512 KB ≈ 50.5 MB → offset 30 MB is
+        //     BEFORE main's write head, so `offset >= endOffset` guard fails
+        // Either way the helper returns nil so `fillDataRequest` falls through
+        // to the network fetch path. (Test would require a real
+        // AVAssetResourceLoadingDataRequest to drive the full flow — verifying
+        // the grace-path nil is sufficient for this layer.)
+        let graceData = await loader.waitForPreloaderData(offset: offset, length: 1024)
+        #expect(graceData == nil, "Neither region covers offset; grace must yield to network fallback")
+    }
+
+    /// Region-aware grace: offset lies in the prefix range (and just past the
+    /// prefix write head). The helper must use the **prefix** region's
+    /// endOffset for the coverSoonWindow math, NOT main's (which is much
+    /// further along at the resume byte). Without region awareness, the old
+    /// code used `cacheStatus` → main's endOffset → `offset - main.endOffset`
+    /// would be a large negative number, making `offset >= main.endOffset`
+    /// false, returning `nil` immediately and falling through to network — the
+    /// bug that this task fixes.
+    @Test func waitForPreloaderData_offsetInPrefix_usesPrefixEndOffset() async {
+        let store = CacheStore()
+        let videoId = "vid-prefix-grace"
+        let totalSize: Int64 = 1_000 * 1024 * 1024 // 1 GB → prefixSize = 10 MB
+        let mainStart: Int64 = 500 * 1024 * 1024   // resume at 500 MB
+        store.setEntry(
+            videoId: videoId,
+            totalSize: totalSize,
+            contentType: "video/mp4",
+            resumeByte: mainStart
+        )
+        // Seed prefix with 10 × 512 KB = 5 MB → prefix endOffset = 5 MB.
+        let prefixChunk = Data(repeating: 0xAA, count: CacheStore.chunkSize)
+        for _ in 0..<10 {
+            _ = store.writeChunk(videoId: videoId, toRegion: .prefix, chunk: prefixChunk)
+        }
+        // Seed main with a few chunks too (simulates main downloading ahead).
+        let mainChunk = Data(repeating: 0xBB, count: CacheStore.chunkSize)
+        for _ in 0..<4 {
+            _ = store.writeChunk(videoId: videoId, toRegion: .main, chunk: mainChunk)
+        }
+
+        // Verify the setup: prefix endOffset 5 MB, main endOffset 502 MB.
+        let prefixStatus = store.regionStatus(videoId: videoId, region: .prefix)
+        let mainStatus = store.regionStatus(videoId: videoId, region: .main)
+        #expect(prefixStatus?.endOffset == Int64(5 * 1024 * 1024))
+        #expect(mainStatus?.endOffset == mainStart + 4 * Int64(CacheStore.chunkSize))
+
+        // Deterministic catch-up: use a custom `graceSleep` stub that performs
+        // the writes synchronously when called. After the first sleep returns,
+        // the prefix region will cover the requested offset. This avoids the
+        // timing race of a detached writer + real-time sleep.
+        let storeRef = store
+        let didWrite = AtomicFlag()
+        let injectedSleep: @Sendable (UInt64) async -> Void = { _ in
+            if !didWrite.swap(true) {
+                for _ in 0..<6 {
+                    _ = storeRef.writeChunk(videoId: videoId, toRegion: .prefix, chunk: Data(repeating: 0xCC, count: CacheStore.chunkSize))
+                }
+            }
+        }
+
+        let loader = CachingResourceLoader(
+            videoId: videoId,
+            originalURL: URL(string: "https://ta.example.com/media/vid-prefix-grace.mp4")!,
+            token: "test-token",
+            store: store,
+            isPreloadingCheck: { _ in true },
+            graceSleep: injectedSleep
+        )
+
+        // Request offset 6 MB — 1 MB past prefix endOffset (5 MB). Within
+        // coverSoonWindow (8 MB). With region-aware logic this is a valid
+        // grace candidate. Without it, the helper would have consulted
+        // `cacheStatus` (main only, endOffset ≈ 502 MB) and the
+        // `offset >= main.endOffset` guard would be false → nil immediately.
+        let requestOffset: Int64 = 6 * 1024 * 1024
+        let requestLength = 64 * 1024
+        let data = await loader.waitForPreloaderData(offset: requestOffset, length: requestLength)
+
+        #expect(data != nil, "Region-aware grace must succeed when offset is in prefix range and prefix preloader catches up")
+        #expect(data?.count == requestLength)
+        // Bytes should come from the catch-up write (0xCC).
+        #expect(data?.first == 0xCC)
     }
 
     // MARK: - Lifecycle / session invalidation
@@ -393,6 +664,22 @@ extension DataLayerSuite {
 
 private final class CancelFlag: @unchecked Sendable {
     var value: Bool = false
+}
+
+/// Thread-safe one-shot flag used by region-aware grace tests to make the
+/// catch-up write run exactly once on the first injected sleep, deterministic
+/// across suite runs (no real-time waits → no race with the 600 ms grace
+/// budget).
+private final class AtomicFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value = false
+    /// Atomically set to `true`; returns the prior value.
+    func swap(_ newValue: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let old = _value
+        _value = newValue
+        return old
+    }
 }
 
 /// Thread-safe counter for verifying that the Task 11 / B4 dedup path does

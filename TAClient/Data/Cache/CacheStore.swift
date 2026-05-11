@@ -9,9 +9,20 @@ private nonisolated let logger = Logger(subsystem: "ru.mzhukov.TAClient", catego
 /// `CachingResourceLoader` hot-read path can hit cache without an actor
 /// executor hop. Task 10 / C1b switched loader + VM to use this type
 /// directly; the preloader (renamed `VideoCachePreloader`) still delegates
-/// through here. All mutable
-/// state (`entry`, `lastPlaybackOffset`) is protected by a single `NSLock`
-/// held only for the duration of the critical section. No async, no actor.
+/// through here.
+///
+/// Task 2 of the prefix-cache-region plan introduces multi-region support:
+/// an entry may now hold a pinned `.prefix` region covering the file head
+/// `[0, N)` as well as the sliding-window `.main` region from the resume
+/// position forward. `setEntry` is now the single source of truth for the
+/// region layout and computes `prefixSize` from `totalSize` via the
+/// `clamp(totalSize × 0.01, 8 MB, 50 MB)` formula. Callers route writes
+/// through `writeChunk(videoId:toRegion:_:)` and read region status via
+/// `regionStatus(videoId:region:)`.
+///
+/// All mutable state (`entry`, `lastPlaybackOffset`) is protected by a
+/// single `NSLock` held only for the duration of the critical section. No
+/// async, no actor.
 ///
 /// Public API is deliberately synchronous — callers on any queue can invoke
 /// these methods without `await`. All members are `nonisolated` so the class
@@ -27,14 +38,65 @@ nonisolated final class CacheStore: @unchecked Sendable {
     static let pauseThreshold = 384_000_000  // pause download when cache exceeds this (1.5x max)
     static let behindMargin = 30_000_000     // keep 30 MB behind playback for keyframe/audio refs
     static let chunkSize = 512 * 1024        // 512 KB
+    static let prefixGrowthCap = 128_000_000 // soft cap on prefix size after promote-on-trim (initial size capped at maxPrefixSize=50 MB; promotes can grow it up to this)
+
+    /// Lower bound for the dynamic prefix-region size (`8 MB`).
+    static let minPrefixSize: Int64 = 8_000_000
+    /// Upper bound for the dynamic prefix-region size (`50 MB`).
+    static let maxPrefixSize: Int64 = 50_000_000
+
+    /// Compute the size of the always-cached file-head region (the `.prefix`
+    /// region) for a given total file size: `clamp(totalSize × 0.01, 8 MB,
+    /// 50 MB)`. Exposed for the preloader and tests; pure function.
+    static func computePrefixSize(totalSize: Int64) -> Int64 {
+        let onePercent = Int64(Double(totalSize) * 0.01)
+        return max(minPrefixSize, min(maxPrefixSize, onePercent))
+    }
+
+    // MARK: - Region types
+
+    /// Identifies a cached byte range within a single video entry.
+    ///
+    /// Task 2 makes both `.prefix` and `.main` first-class regions. `.prefix`
+    /// covers the always-cached file head `[0, N)` (pinned through sliding-
+    /// window trim and `.warning` memory pressure). `.main` is the sliding-
+    /// window region starting at `max(N, resumeByte)` and growing forward.
+    enum RegionID: Hashable {
+        case prefix
+        case main
+
+        /// Short stable name used in log lines, kept in sync with the bare
+        /// string literals already used by `CacheStore`'s trim logs ("main").
+        /// Prefer this over `String(describing:)` at call sites so log format
+        /// stays uniform across files.
+        var name: String {
+            switch self {
+            case .prefix: return "prefix"
+            case .main: return "main"
+            }
+        }
+    }
+
+    /// A contiguous cached byte range stored as a sequence of fixed-size chunks.
+    struct CacheRegion {
+        let id: RegionID
+        var startOffset: Int64           // byte offset where first chunk begins in the file
+        var chunks: [Data]               // array of fixed-size chunks (each up to chunkSize)
+        var cachedByteCount: Int = 0     // total bytes across all chunks
+        var endOffset: Int64 { startOffset + Int64(cachedByteCount) }
+
+        /// True when `offset` falls within the byte range currently held by
+        /// this region (`[startOffset, endOffset)`).
+        func contains(offset: Int64) -> Bool {
+            offset >= startOffset && offset < endOffset
+        }
+    }
 
     // MARK: - CacheEntry
 
     struct CacheEntry {
         let videoId: String
-        var chunks: [Data]                // array of fixed-size chunks (each up to chunkSize)
-        var cachedByteCount: Int = 0      // total bytes across all chunks
-        var startOffset: Int64            // byte offset where first chunk begins in the file
+        var regions: [RegionID: CacheRegion]
         var totalSize: Int64
         var contentType: String
     }
@@ -49,55 +111,101 @@ nonisolated final class CacheStore: @unchecked Sendable {
 
     // MARK: - Reads
 
+    /// Read up to `length` bytes starting at `offset`. If `offset` falls inside
+    /// a cached region but `length` would extend past that region's end (i.e.
+    /// the request straddles a boundary into a different region or the gap
+    /// between regions), only the bytes that lie inside the matched region are
+    /// returned. AVPlayer treats short responses as "send more in a follow-up
+    /// request" so this is safe and lets the loader hand out partial data
+    /// without stitching across regions.
     func readData(videoId: String, offset: Int64, length: Int) -> Data? {
         lock.lock()
         defer { lock.unlock() }
 
         guard let entry, entry.videoId == videoId else { return nil }
+        guard let region = regionForLocked(entry: entry, offset: offset) else { return nil }
 
-        let relativeOffset = Int(offset - entry.startOffset)
-        guard relativeOffset >= 0, relativeOffset < entry.cachedByteCount else { return nil }
+        let relativeOffset = Int(offset - region.startOffset)
+        guard relativeOffset >= 0, relativeOffset < region.cachedByteCount else { return nil }
 
-        let end = min(relativeOffset + length, entry.cachedByteCount)
-        let bytesNeeded = end - relativeOffset
+        // Cap the read to this region's data only. If the caller requested
+        // bytes that span past `region.endOffset`, they get a short response.
+        let maxAvailable = region.cachedByteCount - relativeOffset
+        let bytesNeeded = min(length, maxAvailable)
         guard bytesNeeded > 0 else { return nil }
+
+        // Walk chunks to find the one containing `relativeOffset`. Chunks are
+        // usually `chunkSize`-uniform (the preloader's buffer-and-flush pattern
+        // emits full chunks until the tail of a download, where one partial
+        // chunk may land at the region's end). Promote-on-trim can splice a
+        // prefix's partial tail into the middle of the chunks array, breaking
+        // the previous `currentOffset / chunkSize` shortcut. Linear walk is
+        // O(n) in chunk count but n is bounded (~600 in main, ~200 in prefix)
+        // and reads are typically sequential, so the walk lives entirely in
+        // L1 cache.
+        var chunkStart = 0
+        var chunkIdx = 0
+        while chunkIdx < region.chunks.count {
+            let chunkEnd = chunkStart + region.chunks[chunkIdx].count
+            if relativeOffset < chunkEnd { break }
+            chunkStart = chunkEnd
+            chunkIdx += 1
+        }
+        guard chunkIdx < region.chunks.count else { return nil }
 
         var result = Data(capacity: bytesNeeded)
         var remaining = bytesNeeded
-        var currentOffset = relativeOffset
+        var offsetInChunk = relativeOffset - chunkStart
 
-        while remaining > 0 {
-            let chunkIndex = currentOffset / Self.chunkSize
-            let offsetInChunk = currentOffset % Self.chunkSize
-
-            guard chunkIndex < entry.chunks.count else { break }
-            let chunk = entry.chunks[chunkIndex]
-            guard offsetInChunk < chunk.count else { break }
-
+        while remaining > 0, chunkIdx < region.chunks.count {
+            let chunk = region.chunks[chunkIdx]
             let available = min(remaining, chunk.count - offsetInChunk)
+            if available <= 0 { break }
             result.append(chunk[offsetInChunk..<(offsetInChunk + available)])
 
             remaining -= available
-            currentOffset += available
+            chunkIdx += 1
+            offsetInChunk = 0
         }
 
         return result.isEmpty ? nil : result
     }
 
+    /// Status of the `.main` region only.
+    ///
+    /// Returns `nil` when there's no entry for `videoId`, when the videoId
+    /// doesn't match, or when the entry has only a `.prefix` region (small-file
+    /// edge case where `totalSize <= prefixSize`). Callers that need prefix
+    /// info must use `regionStatus(videoId:region:)` explicitly — this avoids
+    /// the ambiguity of "main if exists else prefix" silently changing meaning
+    /// during the brief window when only prefix is seeded.
     func cacheStatus(videoId: String) -> (startOffset: Int64, endOffset: Int64, totalSize: Int64, contentType: String)? {
         lock.lock()
         defer { lock.unlock() }
         guard let entry, entry.videoId == videoId else { return nil }
-        return (entry.startOffset, entry.startOffset + Int64(entry.cachedByteCount), entry.totalSize, entry.contentType)
+        guard let region = entry.regions[.main] else { return nil }
+        return (region.startOffset, region.endOffset, entry.totalSize, entry.contentType)
     }
 
-    /// Total cached bytes for a given video, or 0 if no entry / wrong id.
-    /// Used by the preloader to decide when to pause downloading.
+    /// Per-region status accessor. Returns the start/end offsets, total file
+    /// size, and content type for the requested region, or `nil` when the
+    /// entry is missing / videoId doesn't match / the region wasn't created.
+    func regionStatus(videoId: String, region: RegionID) -> (startOffset: Int64, endOffset: Int64, totalSize: Int64, contentType: String)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry, entry.videoId == videoId else { return nil }
+        guard let r = entry.regions[region] else { return nil }
+        return (r.startOffset, r.endOffset, entry.totalSize, entry.contentType)
+    }
+
+    /// Total cached bytes across ALL regions for a given video, or 0 if no
+    /// entry / wrong id. Used by the preloader to decide when to pause
+    /// downloading.
     func cachedByteCount(videoId: String) -> Int {
         lock.lock()
         defer { lock.unlock() }
         guard let entry, entry.videoId == videoId else { return 0 }
-        return entry.cachedByteCount
+        return entry.regions.values.reduce(0) { $0 + $1.cachedByteCount }
     }
 
     /// Snapshot of the current entry's videoId, or nil if no entry.
@@ -109,36 +217,90 @@ nonisolated final class CacheStore: @unchecked Sendable {
 
     // MARK: - Writes
 
-    /// Install an empty entry, replacing any existing one. Resets the playback
+    /// Install a fresh entry, replacing any existing one. Resets the playback
     /// offset tracker.
-    func setEntry(videoId: String, startOffset: Int64, totalSize: Int64, contentType: String) {
+    ///
+    /// Region layout is computed from `totalSize` and `resumeByte`:
+    /// - `prefixSize = clamp(totalSize × 0.01, 8 MB, 50 MB)`
+    /// - if `totalSize > prefixSize`: creates BOTH `.prefix` (range `[0, prefixSize)`)
+    ///   AND `.main` (starts at `max(prefixSize, resumeByte)`).
+    /// - if `totalSize <= prefixSize`: creates ONLY `.prefix` (the whole file
+    ///   fits in the prefix region; no main region needed).
+    ///
+    /// Both regions start empty (no chunks); writers append via
+    /// `writeChunk(videoId:toRegion:_:)`.
+    func setEntry(videoId: String, totalSize: Int64, contentType: String, resumeByte: Int64) {
         lock.lock()
         defer { lock.unlock() }
+
+        let prefixSize = Self.computePrefixSize(totalSize: totalSize)
+        // Clamp `resumeByte` into the file's byte range. Corrupt saved
+        // progress, re-encoded video shrinking under us, or rounding past
+        // duration can push `resumeByte` past `totalSize`; without this
+        // clamp the main-region start would equal `totalSize`, producing a
+        // degenerate region with `startOffset == endOffset == totalSize` and
+        // (worse) trapping the preloader's `mainStart..<totalSize` range
+        // construction before our empty-range guard can intervene. Round-trip
+        // to `0` if negative as well, defensively.
+        let clampedResumeByte = min(max(resumeByte, 0), totalSize)
+        var regions: [RegionID: CacheRegion] = [:]
+
+        // Always create the prefix region (covers the file head).
+        let prefixRegion = CacheRegion(
+            id: .prefix,
+            startOffset: 0,
+            chunks: [],
+            cachedByteCount: 0
+        )
+        regions[.prefix] = prefixRegion
+
+        // Create the main region only when the file extends past the prefix
+        // AND the resume position leaves at least one byte for main to cover.
+        // For small files (`totalSize <= prefixSize`) the prefix already
+        // covers everything; when `clampedResumeByte >= totalSize` the main
+        // region would be degenerate (zero-length, anchored at EOF) and
+        // would later trip the preloader's pause-gate / read-path
+        // assumptions. Skip it.
+        if totalSize > prefixSize {
+            let mainStart = max(prefixSize, clampedResumeByte)
+            if mainStart < totalSize {
+                let mainRegion = CacheRegion(
+                    id: .main,
+                    startOffset: mainStart,
+                    chunks: [],
+                    cachedByteCount: 0
+                )
+                regions[.main] = mainRegion
+            }
+        }
+
         entry = CacheEntry(
             videoId: videoId,
-            chunks: [],
-            cachedByteCount: 0,
-            startOffset: startOffset,
+            regions: regions,
             totalSize: totalSize,
             contentType: contentType
         )
         lastPlaybackOffset = 0
     }
 
-    /// Append a chunk to the current entry, auto-trimming behind playback when
-    /// the cache exceeds `trimThreshold`. Returns `false` when there is no
-    /// entry or the entry's videoId doesn't match (chunk was dropped).
+    /// Append a chunk to the named region, auto-trimming the `.main` region
+    /// behind playback when its bytes exceed `trimThreshold`. Returns `false`
+    /// when there is no entry, the entry's videoId doesn't match, or
+    /// `toRegion` doesn't exist on the entry (chunk dropped).
     @discardableResult
-    func writeChunk(videoId: String, chunk: Data) -> Bool {
+    func writeChunk(videoId: String, toRegion: RegionID, chunk: Data) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         guard var current = entry, current.videoId == videoId else { return false }
-        current.chunks.append(chunk)
-        current.cachedByteCount += chunk.count
+        guard var region = current.regions[toRegion] else { return false }
+        region.chunks.append(chunk)
+        region.cachedByteCount += chunk.count
+        current.regions[toRegion] = region
         entry = current
 
-        // Sliding window: trim chunks well behind playback position
-        if current.cachedByteCount > Self.trimThreshold {
+        // Sliding window applies only to the main region. Prefix is pinned —
+        // it never gets trimmed by `writeChunk`.
+        if toRegion == .main, region.cachedByteCount > Self.trimThreshold {
             trimFrontLocked(videoId: videoId)
         }
         return true
@@ -154,8 +316,9 @@ nonisolated final class CacheStore: @unchecked Sendable {
         lastPlaybackOffset = Int64(seconds * avgByterate)
     }
 
-    /// Drop complete chunks well behind playback position. O(1) per chunk — no
-    /// large memmove. Returns bytes removed.
+    /// Drop complete chunks well behind playback position from the `.main`
+    /// region. O(1) per chunk — no large memmove. Returns bytes removed.
+    /// Prefix is pinned and never trimmed.
     @discardableResult
     func trimFront(videoId: String) -> Int {
         lock.lock()
@@ -163,32 +326,35 @@ nonisolated final class CacheStore: @unchecked Sendable {
         return trimFrontLocked(videoId: videoId)
     }
 
-    /// Emergency trim under memory pressure: aggressively shrink cache down to
-    /// `targetSize` by dropping chunks from the front first. Returns bytes
-    /// removed.
+    /// Emergency trim under memory pressure: aggressively shrink the `.main`
+    /// region down to `targetSize` by dropping chunks from the front first.
+    /// Returns bytes removed. Prefix is pinned through `.warning` pressure.
+    /// No-op when no `.main` region exists (small-file case).
     @discardableResult
     func emergencyTrim(videoId: String, targetSize: Int) -> Int {
         lock.lock()
         defer { lock.unlock() }
         guard var current = entry, current.videoId == videoId else { return 0 }
-        guard current.cachedByteCount > targetSize else { return 0 }
+        guard var region = current.regions[.main] else { return 0 }
+        guard region.cachedByteCount > targetSize else { return 0 }
 
-        let overflow = current.cachedByteCount - targetSize
+        let overflow = region.cachedByteCount - targetSize
         // Walk chunks from front and accumulate until we've shed enough bytes.
         var bytesRemoved = 0
         var chunksToRemove = 0
-        for c in current.chunks {
+        for c in region.chunks {
             if bytesRemoved >= overflow { break }
             bytesRemoved += c.count
             chunksToRemove += 1
         }
         guard chunksToRemove > 0 else { return 0 }
 
-        current.chunks.removeFirst(chunksToRemove)
-        current.cachedByteCount -= bytesRemoved
-        current.startOffset += Int64(bytesRemoved)
+        region.chunks.removeFirst(chunksToRemove)
+        region.cachedByteCount -= bytesRemoved
+        region.startOffset += Int64(bytesRemoved)
+        current.regions[.main] = region
         entry = current
-        logger.info("Emergency-trimmed \(bytesRemoved / 1_000_000)MB from \(videoId) (target \(targetSize / 1_000_000)MB)")
+        logger.info("Emergency-trimmed \(bytesRemoved / 1_000_000)MB from main of \(videoId) (target \(targetSize / 1_000_000)MB)")
         return bytesRemoved
     }
 
@@ -202,27 +368,96 @@ nonisolated final class CacheStore: @unchecked Sendable {
 
     // MARK: - Internal (lock already held)
 
-    /// Caller must hold `lock`.
+    /// Find the region in `entry` that contains `offset`, or `nil` when no
+    /// region covers it. Caller must hold `lock`.
+    ///
+    /// Lookup order: `.prefix` first (covers file head), then `.main`. This
+    /// makes the implicit invariant that prefix and main never overlap an
+    /// observable contract — if both regions ever cover the same offset, the
+    /// one returned here is the prefix. (Per `setEntry`, `main.startOffset =
+    /// max(prefixSize, resumeByte) >= prefix.endOffset`, so the regions are
+    /// disjoint by construction.)
+    private func regionForLocked(entry: CacheEntry, offset: Int64) -> CacheRegion? {
+        if let prefix = entry.regions[.prefix], prefix.contains(offset: offset) {
+            return prefix
+        }
+        if let main = entry.regions[.main], main.contains(offset: offset) {
+            return main
+        }
+        return nil
+    }
+
+    /// Public locked variant of `regionForLocked` exposed for tests; takes the
+    /// lock internally and returns a snapshot copy of the matching region.
+    /// Returns `nil` when no entry / wrong videoId / no region covers
+    /// `offset`.
+    func regionFor(videoId: String, offset: Int64) -> CacheRegion? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry, entry.videoId == videoId else { return nil }
+        return regionForLocked(entry: entry, offset: offset)
+    }
+
+    /// Caller must hold `lock`. Trims main's front; if main is adjacent to
+    /// prefix (`prefix.endOffset == main.startOffset`) and prefix is under
+    /// `maxPrefixSize`, promotes the trimmed chunks to prefix's tail instead
+    /// of discarding them. This keeps the cache contiguous across the prefix/main
+    /// boundary and eliminates the gap that AVPlayer's moov re-reads can fall
+    /// into after long playback. When prefix is at cap or main is not adjacent,
+    /// trimmed chunks are discarded as before.
     @discardableResult
     private func trimFrontLocked(videoId: String) -> Int {
         guard var current = entry, current.videoId == videoId else { return 0 }
+        guard var region = current.regions[.main] else { return 0 }
         let safeTrimBound = lastPlaybackOffset - Int64(Self.behindMargin)
-        let maxTrimBytes = Int(safeTrimBound - current.startOffset)
+        let maxTrimBytes = Int(safeTrimBound - region.startOffset)
         guard maxTrimBytes >= Self.minTrimSize else { return 0 }
 
-        let trimBytes = min(maxTrimBytes, current.cachedByteCount - Self.maxCacheSize)
+        let trimBytes = min(maxTrimBytes, region.cachedByteCount - Self.maxCacheSize)
         guard trimBytes >= Self.minTrimSize else { return 0 }
 
         // Remove complete chunks from front
         let chunksToRemove = trimBytes / Self.chunkSize
         guard chunksToRemove > 0 else { return 0 }
 
-        let bytesRemoved = current.chunks.prefix(chunksToRemove).reduce(0) { $0 + $1.count }
-        current.chunks.removeFirst(chunksToRemove)
-        current.cachedByteCount -= bytesRemoved
-        current.startOffset += Int64(bytesRemoved)
+        // Determine how many of the to-be-trimmed chunks can be promoted into
+        // prefix. Conditions: (1) prefix exists, (2) prefix.endOffset ==
+        // main.startOffset (no gap to bridge across), (3) prefix is below its
+        // soft cap. Promoted chunks extend prefix's tail; the rest are
+        // discarded.
+        var chunksToPromote = 0
+        var promotedBytes = 0
+        if var prefix = current.regions[.prefix],
+           prefix.endOffset == region.startOffset,
+           prefix.cachedByteCount < Self.prefixGrowthCap {
+            let headroom = Self.prefixGrowthCap - prefix.cachedByteCount
+            for chunk in region.chunks.prefix(chunksToRemove) {
+                if promotedBytes + chunk.count > headroom { break }
+                chunksToPromote += 1
+                promotedBytes += chunk.count
+            }
+            if chunksToPromote > 0 {
+                prefix.chunks.append(contentsOf: region.chunks.prefix(chunksToPromote))
+                prefix.cachedByteCount += promotedBytes
+                current.regions[.prefix] = prefix
+            }
+        }
+
+        let bytesRemovedFromMain = region.chunks.prefix(chunksToRemove).reduce(0) { $0 + $1.count }
+        region.chunks.removeFirst(chunksToRemove)
+        region.cachedByteCount -= bytesRemovedFromMain
+        region.startOffset += Int64(bytesRemovedFromMain)
+        current.regions[.main] = region
         entry = current
-        logger.info("Trimmed \(bytesRemoved / 1_000_000)MB from front of \(videoId)")
-        return bytesRemoved
+
+        let discarded = bytesRemovedFromMain - promotedBytes
+        if promotedBytes > 0 && discarded > 0 {
+            logger.info("Trimmed \(bytesRemovedFromMain / 1_000_000)MB from main (promoted \(promotedBytes / 1_000_000)MB to prefix, discarded \(discarded / 1_000_000)MB) for \(videoId)")
+        } else if promotedBytes > 0 {
+            logger.info("Trimmed \(bytesRemovedFromMain / 1_000_000)MB from main (all promoted to prefix) for \(videoId)")
+        } else {
+            logger.info("Trimmed \(bytesRemovedFromMain / 1_000_000)MB from front of main for \(videoId)")
+        }
+        return bytesRemovedFromMain
     }
 }

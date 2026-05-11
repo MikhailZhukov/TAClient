@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TAClient — iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 103 app files + 1 Share Extension file, 50 test files, 493 passing tests. Licensed under Apache-2.0 (MobileVLCKit remains under LGPL-2.1-or-later — see `NOTICE`).
+TAClient — iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 103 app files + 1 Share Extension file, 50 test files, 525 passing tests (excluding `testLaunchPerformance` — known XCUITest perf-metric flake unrelated to project code). Licensed under Apache-2.0 (MobileVLCKit remains under LGPL-2.1-or-later — see `NOTICE`).
 
 ## Build & Run
 
@@ -206,15 +206,21 @@ Two player paths, selected automatically by `CodecSupport.requiredPlayer(for:)`:
 
 **In-memory video cache (`Data/Cache/`):**
 - **Split architecture** (PR 6/7): `CacheStore` (`final class`, NSLock-guarded) owns all state — entry, chunks, `lastPlaybackOffset`, memory-pressure source. Sync API (`readData`, `writeChunk`, `cacheStatus`, `updatePlaybackPosition`, `trimFront`, `emergencyTrim`, `clear`) means `CachingResourceLoader` reads cache on AVPlayer's hot path with zero `await`s. `VideoCachePreloader` is an `actor` (singleton `.shared`) that wraps download/preload orchestration; it exposes a `nonisolated let store: CacheStore` so the loader can read directly via `VideoCachePreloader.shared.store.readData(...)`.
+- **Two-region architecture**: each entry holds a `[RegionID: CacheRegion]` map keyed by `.prefix` and `.main`. The **prefix** region is pinned at `[0, N)` where `N = clamp(totalSize × 1%, 8MB, 50MB)` and survives `.warning` memory pressure — only `.critical` or explicit `clear()` drops it. The **main** region spans `[max(N, resumeByte), ∞)` and slides with playback as today (trim-front, emergency-trim, behind-margin all scoped to main). The preloader launches prefix and main downloads in parallel via `async let`. Why: a pinned cached moov atom (always within the prefix) prevents AVPlayer item-reload after scrub on resumed playback — root cause of the scrub-after-resume freeze where AVPlayer failed on a moov-range request, replaced `currentItem`, and stalled with the main region pointing far past byte 0.
+- **Region accessors**: `store.cacheStatus(videoId:)` returns the `.main` region status only and is `nil` for small files (where only prefix exists, `totalSize <= prefixSize`) or after a `.critical` clear before re-seeding. Callers that need prefix or want a generic "is region X populated" check MUST use `regionStatus(videoId:region:)` explicitly. The loader's `fillContentInfo` falls back to `regionStatus(.prefix)` because content-info needs only `totalSize`/`contentType`, both entry-scoped; the preloader's fast-path requires BOTH `.prefix` and `.main` populated before skipping (a prior `.critical` may have wiped prefix).
+- **Per-task failure isolation in `downloadVideo`**: each of `prefixResult`/`mainResult` async lets is awaited inside its own do/catch, so a 503 / auth failure / transport error in one region does not propagate to the sibling task. The store's per-region `writeChunk(videoId:toRegion:)` keeps writes scoped — main's auto-trim never touches prefix bytes.
+- **Generation-guarded clear**: `downloadVideo` captures the preloader's `preloadGeneration` at spawn; the empty-cache `store.clear()` at the end of `downloadVideo` runs ONLY when `generation == preloadGeneration`. Otherwise a newer `startPreloadWithRetry` for the same `videoId` that already cancelled this attempt and seeded a fresh entry would be wiped by the orphan task's terminal clear.
+- **Degenerate-range guards**: `CacheStore.setEntry` clamps `resumeByte` into `[0, totalSize]` and skips creating `.main` when `clampedResumeByte >= totalSize` (small file / EOF resume); `VideoCachePreloader.downloadVideo` does the same clamp before constructing `mainStartByte..<totalSize` so Swift's `Range` cannot trap on a corrupted/rounded-past-end resume.
+- **Pause gate is per-region**: only the `.main` download task observes `pauseThreshold` and calls `trimFront`. Summing both regions would let the `.main` task fill past pauseThreshold while playback sits at byte 0 (no trim leverage) and deadlock the `.prefix` task in its Task.sleep loop forever — prefix has no trim mechanism of its own and is bounded by `maxPrefixSize = 50MB ≪ pauseThreshold = 384MB` so it can never trip the gate on its own.
 - `CachingResourceLoader` (`AVAssetResourceLoaderDelegate`, must be `nonisolated`) — serves AVPlayer byte-range requests from `store`, falls back to network (16MB cap per request). Tracks in-flight tasks in `activeTasks` under an `NSLock`; `resourceLoader(_:didCancel:)` cancels the matching task. Invalidates its `URLSession` in `deinit`. Implements preloader-catches-up grace window (`coverSoonWindow = 8MB`, up to 3× 200ms sleeps) before falling through to network when the preloader is active and close to serving the requested offset.
 - Preload starts on `loadVideo()` before user presses play; uses `startPosition`/`duration` to seek via HTTP Range header
 - Preload has retry with exponential backoff (1s, 2s) on transient network errors
 - Sliding window: 256MB max cache, trim at 282MB, pause download at 384MB, 30MB behind-margin for keyframe refs
 - Trim position tracked from ViewModel's time observer — NOT from resource loader reads (AVPlayer read-ahead would cause trim overshoot)
 - All cache URLSessions use `httpCookieStorage = nil` + `urlCache = nil`
-- HEAD-probe session in `VideoCachePreloader.downloadVideo` (`startPosition > 0 && duration > 0` branch) is delegate-less and short-lived; bound its lifetime with `defer { headSession.finishTasksAndInvalidate() }` immediately after construction so cleanup runs on every exit path including the early 401/403 return
+- HEAD probe runs unconditionally in `VideoCachePreloader.probeTotalSize` (called by `downloadVideo` for every preload — we always need `totalSize` to compute the prefix/main boundary, not just when resuming); the delegate-less probe session is short-lived and bound by `defer { headSession.finishTasksAndInvalidate() }` immediately after construction so cleanup runs on every exit path including the early 401/403 return
 - `preferredForwardBufferDuration = 30` set in `VideoDetailViewModel.startAVPlayback` — limits AVPlayer's internal buffer since we manage our own 256MB cache. Without this cap, AVPlayer's unbounded internal buffer duplicates cache data and RAM grows unboundedly on large VBR files. Instruments validation recommended.
-- Memory pressure split: `.warning` → `store.emergencyTrim(targetSize: maxCacheSize / 2)` (surgical, preload keeps running); `.critical` → `store.clear()` + cancel preload (system is about to terminate us).
+- Memory pressure split: `.warning` → `store.emergencyTrim(targetSize: maxCacheSize / 2)` (surgical, preload keeps running, **prefix is pinned through `.warning`** — only main is trimmed); `.critical` → `store.clear()` + cancel preload (system is about to terminate us; both prefix AND main are dropped, fast-path on the next preload must re-fetch prefix even if main was still populated).
 - 401/403 from the preloader download or the loader network fallback posts `.taAuthUnauthorized` (see API Details).
 
 **Important — do NOT:**
@@ -284,9 +290,9 @@ Automatic skip of sponsor segments and other non-content sections during playbac
 
 ## Testing
 
-**493 tests, all passing.** Swift Testing framework (`@Test`, `#expect()`) — NOT XCTest.
+**525 tests, all passing** (excluding `testLaunchPerformance` — known XCUITest perf-metric flake unrelated to project code). Swift Testing framework (`@Test`, `#expect()`) — NOT XCTest.
 
-Phase counts below are approximate scope buckets, not exact tallies — suites have grown organically and a number of cross-cutting suites (`AppRouterTests`, `AuthStateTests`, `NotificationTests`, `SponsorBlock*Tests`, `UserPrivilegesTests`, `PlayerGestureTests`, `SimilarVideosTests`, several ViewModel suites, etc.) cover behaviour spanning multiple phases. Only the 493 total is canonical.
+Phase counts below are approximate scope buckets, not exact tallies — suites have grown organically and a number of cross-cutting suites (`AppRouterTests`, `AuthStateTests`, `NotificationTests`, `SponsorBlock*Tests`, `UserPrivilegesTests`, `PlayerGestureTests`, `SimilarVideosTests`, several ViewModel suites, etc.) cover behaviour spanning multiple phases. Only the 525 total is canonical.
 
 | Phase | Tests | Scope |
 |-------|-------|-------|

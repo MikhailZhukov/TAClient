@@ -287,7 +287,7 @@ extension DataLayerSuite {
 /// (the posters send the target videoId) — this prevents cross-test bleed
 /// when a prior test's async teardown posts `.taAuthUnauthorized` after
 /// this test has already subscribed.
-private final class NotificationExpectation: @unchecked Sendable {
+final class NotificationExpectation: @unchecked Sendable {
     private let lock = NSLock()
     private var didFire = false
     private var token: NSObjectProtocol?

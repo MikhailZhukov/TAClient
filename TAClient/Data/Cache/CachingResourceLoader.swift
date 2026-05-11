@@ -187,9 +187,16 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     }
 
     private func fillContentInfo(_ contentRequest: AVAssetResourceLoadingContentInformationRequest) async -> Bool {
-        if let status = store.cacheStatus(videoId: videoId) {
-            contentRequest.contentLength = status.totalSize
-            contentRequest.contentType = contentTypeUTI(from: status.contentType)
+        // Task 4 region-aware lookup: `cacheStatus` returns the `.main` region
+        // only and is `nil` for small-file entries that only have `.prefix`.
+        // For content-info we only need `totalSize` + `contentType`, both of
+        // which are entry-scoped (identical across regions), so fall back to
+        // the prefix region when main isn't there.
+        let entryStatus = store.cacheStatus(videoId: videoId)
+            ?? store.regionStatus(videoId: videoId, region: .prefix)
+        if let entryStatus {
+            contentRequest.contentLength = entryStatus.totalSize
+            contentRequest.contentType = contentTypeUTI(from: entryStatus.contentType)
             contentRequest.isByteRangeAccessSupported = true
             return true
         }
@@ -282,14 +289,33 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     /// - requires `offset - endOffset < coverSoonWindow`,
     /// - requires the preloader to still be active for `videoId`.
     ///
+    /// **Region-aware** (Task 4 of prefix-cache-region plan): an entry may hold
+    /// two regions (`.prefix` and `.main`). The "is preloader close to serving
+    /// this offset" decision must be made against the region that *would*
+    /// contain the requested offset, not the single `.main` status. We pick the
+    /// target region by comparing `offset` against each region's
+    /// `[startOffset, endOffset)` range and the gap distance to its
+    /// `endOffset`:
+    ///
+    /// 1. Try `.prefix` — if `offset` falls inside or within `coverSoonWindow`
+    ///    of its `endOffset` (i.e. forward of the prefix write head), use its
+    ///    `endOffset` for the gap math.
+    /// 2. Otherwise try `.main` — same check.
+    /// 3. If neither region is a candidate, return `nil` (caller falls through
+    ///    to network as before).
+    ///
+    /// This ensures a prefix-region request waits on the prefix preloader task
+    /// even when the `.main` write head is far ahead (e.g. resume at byte 470M
+    /// with prefix downloading concurrently at byte 5M).
+    ///
     /// Exposed `internal` so `CachingResourceLoaderTests` can exercise the
     /// dedup loop directly (AVAssetResourceLoadingDataRequest has no public
     /// initializer, so we can't drive `fillDataRequest` end-to-end from Swift
     /// Testing).
     func waitForPreloaderData(offset: Int64, length: Int) async -> Data? {
-        guard let status = store.cacheStatus(videoId: videoId) else { return nil }
-        guard offset >= status.endOffset else { return nil }
-        guard offset - status.endOffset < coverSoonWindow else { return nil }
+        guard let endOffset = relevantEndOffset(forOffset: offset) else { return nil }
+        guard offset >= endOffset else { return nil }
+        guard offset - endOffset < coverSoonWindow else { return nil }
         guard await isPreloadingCheck(videoId) else { return nil }
 
         for _ in 0..<maxGraceAttempts {
@@ -301,6 +327,39 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             }
         }
         return nil
+    }
+
+    /// Returns the relevant region's `endOffset` to gauge gap distance
+    /// against `offset`. Prefix is chosen when `offset` lies before main's
+    /// `startOffset` (or main doesn't exist); otherwise main. The actual
+    /// distance / `coverSoonWindow` check is the caller's responsibility
+    /// (`waitForPreloaderData`).
+    ///
+    /// Given the prefix/main layout (`prefix` covers `[0, N)`, `main` starts
+    /// at `max(N, resumeByte)`), this resolves to:
+    /// - `offset < main.startOffset` (or no main): prefix.endOffset
+    /// - otherwise: main.endOffset
+    /// Returns `nil` only when neither region exists.
+    private func relevantEndOffset(forOffset offset: Int64) -> Int64? {
+        let prefix = store.regionStatus(videoId: videoId, region: .prefix)
+        let main = store.regionStatus(videoId: videoId, region: .main)
+
+        if let prefix {
+            // Prefix is the natural target when offset is forward of its
+            // write head AND main hasn't yet started covering this offset
+            // (offset < main.startOffset, or no main at all). The
+            // distance-from-write-head check is performed by the caller.
+            let mainStart = main?.startOffset ?? Int64.max
+            if offset < mainStart {
+                return prefix.endOffset
+            }
+        }
+
+        if let main {
+            return main.endOffset
+        }
+
+        return prefix?.endOffset
     }
 
     private func fetchFromNetwork(
