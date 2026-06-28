@@ -48,7 +48,7 @@ struct DownloadQueueView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
-                    ForEach(viewModel.items) { item in
+                    ForEach(viewModel.items, id: \.id) { item in
                         DownloadItemRow(item: item)
                             .onAppear {
                                 if let index = viewModel.items.firstIndex(where: { $0.id == item.id }),
@@ -95,11 +95,16 @@ struct DownloadQueueView: View {
                     }
                 }
                 .listStyle(.plain)
+                .animation(.default, value: viewModel.items)
                 .refreshable {
                     await viewModel.refresh()
                 }
             }
         }
+        // Animate the progress block's appearance/disappearance only on batch
+        // start/finish. The block stays fully absent (no reserved empty space) when
+        // idle because it renders only when `downloadProgress` is non-empty.
+        .animation(.default, value: viewModel.downloadProgress.isEmpty)
         .geometryGroup()
         .safeAreaInset(edge: .top) {
             if authState.isPrivileged {
@@ -241,6 +246,15 @@ private struct DownloadItemRow: View {
 private struct TaskNotificationBanner: View {
     let info: TaskNotification
 
+    // Non-breaking space placeholder keeps the message row's height reserved (at the
+    // same `.caption` text style) when there is no message to show.
+    private var messageText: String {
+        if let last = info.messages.last, !last.isEmpty {
+            return last
+        }
+        return "\u{00A0}"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
@@ -267,17 +281,19 @@ private struct TaskNotificationBanner: View {
                 }
             }
 
-            if let lastMessage = info.messages.last, !lastMessage.isEmpty {
-                Text(lastMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
+            // Always render the message row (using a non-breaking space placeholder
+            // when empty) so the banner keeps a constant height tick-to-tick as
+            // messages change. lineLimit(1) caps it to a single line.
+            Text(messageText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
 
-            if !info.isError {
-                ProgressView(value: info.progress)
-                    .tint(.blue)
-            }
+            // Always reserve the progress-bar row's vertical space. On error the bar
+            // is hidden (but its space is kept) so toggling error state does not resize.
+            ProgressView(value: info.isError ? 0 : info.progress)
+                .tint(.blue)
+                .opacity(info.isError ? 0 : 1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)

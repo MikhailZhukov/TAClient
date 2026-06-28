@@ -350,10 +350,11 @@ enum TestData {
 
     static func downloadListResult(
         count: Int = 3,
+        startIndex: Int = 0,
         currentPage: Int = 1,
         lastPage: Int = 1
     ) -> DownloadListResult {
-        let items = (0..<count).map { i in
+        let items = (startIndex..<startIndex + count).map { i in
             downloadItem(youtubeId: "dl-\(i)", title: "Download \(i)")
         }
         return DownloadListResult(items: items, currentPage: currentPage, lastPage: lastPage)

@@ -13,7 +13,7 @@ enum MemoryDiagnostics {
     /// `mach_task_basic_info` synchronously — safe from any thread.
     /// Returns 0 on `task_info` failure (defensive; we'd rather log a
     /// zero than crash).
-    static func residentBytes() -> Int64 {
+    nonisolated static func residentBytes() -> Int64 {
         var info = mach_task_basic_info()
         var count = mach_msg_type_number_t(
             MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size
@@ -32,7 +32,7 @@ enum MemoryDiagnostics {
     }
 
     /// Formatted MB string for logging: "1234MB".
-    static func residentMBString() -> String {
+    nonisolated static func residentMBString() -> String {
         "\(residentBytes() / 1_000_000)MB"
     }
 }

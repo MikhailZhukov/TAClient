@@ -112,6 +112,16 @@ DI/        → DependencyContainer (manual singleton)
 - Multi-select batch operations (same as video list)
 - Watched state changes notify router via `markWatchedChanged()` for cross-screen sync
 
+## Download Queue
+
+Stable-scroll polling contract — the list must not "jump to the top" during active downloads.
+
+- **No page-1 collapse:** the 3s polling loop's reconcile (`DownloadQueueViewModel.performPollTick`, the testable seam extracted from `startPolling`) NEVER calls `loadDownloads(page: 1)`. It reconciles via `fetchAllLoadedPages()`, which preserves pagination depth and `currentPage` (only clamped down via `min(currentPage, newLastPage)`, never reset to 1). The old page-1 collapse was the root cause of scroll being thrown to the top during active downloads.
+- **Batch-finish branch is filter-aware:** it reconciles `items` only when `filter == "pending"` and skips the reconcile on the ignore tab — `fetchAllLoadedPages()` hardcodes `filter: "pending"` and polling is NOT stopped on filter switch, so reconciling on the ignore tab would clobber it with pending data. `downloadProgress` is always updated; the finish branch returns `false` (stop polling).
+- **Identity-preserving updates:** `applyPolledItems` is `@discardableResult -> Bool` with an equality short-circuit (returns `false` / no reassignment when the filtered result equals current `items`, so SwiftUI sees no change). List updates rely on SwiftUI `List` diffing by `DownloadItem.id` (== `youtubeId`) for identity-preserving reorders/removals, animated via `.animation(.default, value: viewModel.items)` in the View.
+- **Constant-height progress header:** `TaskNotificationBanner` reserves a fixed height tick-to-tick — the message line always renders (non-breaking-space placeholder when empty, `lineLimit(1)`) and the progress bar is always rendered with `.opacity(info.isError ? 0 : 1)` (hidden on error but layout space kept). The whole `downloadProgress` block is fully absent when `downloadProgress.isEmpty` (no reserved empty space at idle), animated in/out.
+- **Test seam:** `performPollTick` and `applyPolledItems` are `internal` (not `private`) for `@testable import` access; covered by `DownloadQueueViewModelTests`.
+
 ## Share Extension
 
 `ShareExtension/` is a separate Xcode target (`com.apple.product-type.app-extension`) embedded in the main app.

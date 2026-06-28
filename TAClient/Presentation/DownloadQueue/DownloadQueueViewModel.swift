@@ -158,35 +158,63 @@ final class DownloadQueueViewModel {
                     break
                 }
 
-                do {
-                    let notifications = try await downloadRepository.getNotifications()
-                    let hasActiveDownload = notifications.contains { $0.group.hasPrefix("download") }
-
-                    downloadProgress = notifications
-
-                    if !hasActiveDownload {
-                        pendingRemovals.removeAll()
-                        await loadDownloads(isRefresh: true)
-                        downloadProgress = notifications.isEmpty ? [] : notifications
-                        break
-                    }
-
-                    if filter == "pending" {
-                        let (newItems, newLastPage) = try await fetchAllLoadedPages()
-                        applyPolledItems(newItems)
-                        lastPage = newLastPage
-                        if currentPage > newLastPage {
-                            currentPage = newLastPage
-                        }
-                    }
-                } catch is CancellationError {
-                    break
-                } catch {
-                    // transient error — keep polling
-                }
+                let keepPolling = await performPollTick()
+                if !keepPolling { break }
             }
             pollingTask = nil
         }
+    }
+
+    /// Executes a single polling tick. Returns `true` to keep polling, `false` to stop.
+    /// Internal (not private) so tests can drive the reconcile logic without the 3s sleep.
+    func performPollTick() async -> Bool {
+        do {
+            let notifications = try await downloadRepository.getNotifications()
+            let hasActiveDownload = notifications.contains { $0.group.hasPrefix("download") }
+
+            downloadProgress = notifications
+
+            if !hasActiveDownload {
+                // Batch finished — clear optimistic-removal tracking, then reconcile.
+                pendingRemovals.removeAll()
+                try await reconcileLoadedPages()
+                return false
+            }
+
+            try await reconcileLoadedPages()
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            // transient error — keep polling, retry next tick
+            return true
+        }
+    }
+
+    /// Refetches all currently-loaded pages of the pending list, reconciles `items`,
+    /// and clamps pagination — preserving the loaded depth (never collapses to page 1).
+    ///
+    /// Filter-aware: `fetchAllLoadedPages` always reads `filter: "pending"`, so this is
+    /// a no-op on the ignore tab. The guard is re-checked AFTER the await because the
+    /// fetch is a suspension point and `onFilterChanged` (View `.onChange`, not gated by
+    /// `stopPolling`) can switch tabs mid-fetch — applying pending data then would clobber
+    /// the ignore tab with the wrong list (TOCTOU). On a mid-await switch we drop the
+    /// stale pending data entirely.
+    private func reconcileLoadedPages() async throws {
+        guard filter == "pending" else { return }
+        // Snapshot the loaded depth: `fetchAllLoadedPages` reads pages 1...currentPage,
+        // so its result reflects this depth. The await below is a suspension point.
+        let depthBefore = currentPage
+        let (newItems, newLastPage) = try await fetchAllLoadedPages()
+        // Re-check BOTH the filter (mid-await `onFilterChanged`, see doc comment) AND the
+        // loaded depth: a concurrent `loadMoreIfNeeded` can advance `currentPage` and append
+        // a new page to `items` while we were awaiting. Applying the shallow snapshot now would
+        // drop that just-loaded page and clamp the scroll back — defeating stable-scroll. Drop
+        // the stale snapshot; the next 3s tick reconciles cleanly at the new depth.
+        guard filter == "pending", currentPage == depthBefore else { return }
+        applyPolledItems(newItems)
+        lastPage = newLastPage
+        currentPage = min(currentPage, newLastPage)
     }
 
     func stopPolling() {
@@ -259,16 +287,33 @@ final class DownloadQueueViewModel {
             }
 
             pageResults.sort { $0.0 < $1.0 }
-            let merged = pageResults.flatMap { $0.1.items }
+            // Dedup by youtubeId (preserve first occurrence / server order) so API page
+            // drift can't produce duplicate ids — mirrors `loadMoreIfNeeded`. Duplicate
+            // ids would trip SwiftUI's `ForEach(..., id: \.id)` and mis-animate.
+            var seen = Set<String>()
+            var merged: [DownloadItem] = []
+            for (_, result) in pageResults {
+                for item in result.items where seen.insert(item.youtubeId).inserted {
+                    merged.append(item)
+                }
+            }
             let newLastPage = pageResults.last?.1.lastPage ?? 1
             return (merged, newLastPage)
         }
     }
 
-    private func applyPolledItems(_ newItems: [DownloadItem]) {
+    /// Reconciles `items` with freshly polled data, filtering out anything in
+    /// `pendingRemovals` and adopting the server order. Returns `true` when `items`
+    /// was reassigned, `false` when the filtered result equals the current `items`
+    /// (the short-circuit — no reassignment, so SwiftUI sees no change).
+    /// Internal (not private) so tests can drive the reconcile/short-circuit directly.
+    @discardableResult
+    func applyPolledItems(_ newItems: [DownloadItem]) -> Bool {
         let filtered = newItems.filter { !pendingRemovals.contains($0.youtubeId) }
         if filtered != items {
             items = filtered
+            return true
         }
+        return false
     }
 }
