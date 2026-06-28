@@ -67,6 +67,14 @@ final class VideoDetailViewModel {
     /// Throttles cache-health logs to once per 3s from the 1s UI observer.
     @ObservationIgnored
     nonisolated(unsafe) private var lastCacheLogTime: CFAbsoluteTime = 0
+    /// Throttle scalar for `[AVAccess]` log emissions. AVPlayer posts an
+    /// access log entry on every byte-range completion (many per second on
+    /// AV1 4K start). The diagnostic value lives in the trend, not every
+    /// sample — 30 s between writes keeps the captured log readable.
+    /// Touched on the notification queue; lock-guarded for parity with the
+    /// other progressQueue-touched scalars.
+    @ObservationIgnored
+    nonisolated(unsafe) private var lastAVAccessLogAt: CFAbsoluteTime = 0
     /// Last currentTime sample seen by the 1Hz observer — used to detect
     /// unexpected backward jumps (bug 1: tail replay). Same isolation as the
     /// other progressQueue-touched scalars.
@@ -77,6 +85,76 @@ final class VideoDetailViewModel {
     /// 1s of an explicit seek — those are intentional, not a replay bug.
     @ObservationIgnored
     nonisolated(unsafe) private var lastExplicitSeekAt: CFAbsoluteTime = VideoDetailViewModel.resetExplicitSeekTimestamp()
+    /// Snapshot of the streaming URL used to build the currently-playing
+    /// asset. Captured in `configureAsset` so the 1Hz reseed trigger can pass
+    /// the SAME URL to `VideoCachePreloader.reseedMain` that AVPlayer is
+    /// currently using — including after an AirPlay swap rebuilds the asset.
+    /// Cleared in `stopPlayback`. Same isolation story as the other
+    /// progressQueue-touched scalars: read on the time observer's queue,
+    /// written from the MainActor `configureAsset` / `stopPlayback` paths,
+    /// guarded by `progressStateLock`.
+    @ObservationIgnored
+    nonisolated(unsafe) private var streamingURL: URL?
+    /// Snapshot of the auth token used to build the currently-playing asset.
+    /// Captured + cleared on the same paths as `streamingURL`. The app has no
+    /// token-refresh flow — tokens only change on logout/login, so a snapshot
+    /// taken at asset construction time is valid for the lifetime of the
+    /// asset; a stale-token-during-reseed → 401 → existing
+    /// `.taAuthUnauthorized` path → router clears Keychain + returns to login.
+    @ObservationIgnored
+    nonisolated(unsafe) private var authToken: String?
+    /// Wallclock time of the most recent `reseedMain` dispatch from the 1Hz
+    /// trigger. Paired with `lastReseedTargetByte` by `ReseedTrigger.shouldDebounce`
+    /// to suppress duplicate reseeds when the user rapid-scrubs. Intentionally
+    /// NOT reset in `stopPlayback` — values are stateless across stops and a
+    /// stale 2s debounce window is harmless once playback ends.
+    ///
+    /// Defaults to `0` deliberately — this is the only `CFAbsoluteTime` field
+    /// in the VM where `0` is the correct sentinel. Unlike `lastExplicitSeekAt`
+    /// (which feeds a "seconds since" diagnostic via `CFAbsoluteTimeGetCurrent()
+    /// - lastSeek`), `lastReseedAt` is consumed exclusively by
+    /// `ReseedTrigger.shouldDebounce(now:lastReseedAt:...)` whose only check is
+    /// `now - lastReseedAt < debounceInterval`. With `lastReseedAt = 0` the
+    /// elapsed value is ~800 million seconds (current CFAbsoluteTime epoch is
+    /// 2001-01-01), making the inequality trivially false — the FIRST tick is
+    /// never debounced, which is the intended behavior. No 25-year cosmetic
+    /// log skew is possible because this field does not feed any diagnostic
+    /// log line. See the contrasting `lastExplicitSeekAt =
+    /// VideoDetailViewModel.resetExplicitSeekTimestamp()` default above.
+    @ObservationIgnored
+    nonisolated(unsafe) private var lastReseedAt: CFAbsoluteTime = 0
+    /// Target byte of the most recent reseed dispatch, paired with
+    /// `lastReseedAt` for debounce. Same lifecycle as `lastReseedAt`.
+    @ObservationIgnored
+    nonisolated(unsafe) private var lastReseedTargetByte: Int64 = 0
+    /// Wallclock time of the most recent `restartPreloadIfNeeded` dispatch
+    /// from the 1Hz trigger. Used by `RestartTrigger.shouldRestart(now:
+    /// lastRestartAt:...)` to enforce a 15 s cooldown between restart
+    /// attempts so an empty-cache window doesn't dispatch a restart on
+    /// every observer tick. Same `nonisolated(unsafe)` + `progressStateLock`-
+    /// guarded contract as `lastReseedAt`.
+    ///
+    /// Defaults to `0` deliberately — same reasoning as `lastReseedAt`: the
+    /// only consumer is the inequality `(now - lastRestartAt) >= cooldown`
+    /// inside `RestartTrigger.shouldRestart`, where `0` produces a
+    /// trivially-elapsed (~800 million second) delta, ensuring the FIRST
+    /// tick is never cooldown-blocked. No diagnostic log line reads this
+    /// scalar, so the CFAbsoluteTime epoch quirk is harmless here.
+    /// Intentionally NOT reset in `stopPlayback` — a stale 15 s cooldown
+    /// across stops is harmless.
+    @ObservationIgnored
+    nonisolated(unsafe) private var lastRestartAt: CFAbsoluteTime = 0
+
+    /// Debounce window for `reseedMain` dispatch from the 1Hz trigger.
+    /// Suppresses re-fire when the user rapid-scrubs across multiple
+    /// destinations within 2s.
+    nonisolated private static let reseedDebounceInterval: CFAbsoluteTime = 2.0
+    /// Byte-distance tolerance for the reseed debounce — two reseed targets
+    /// within 10 MB of each other are treated as "the same target" for
+    /// debounce purposes. Large enough to absorb VBR linear-interpolation
+    /// drift between observer ticks; small enough that a deliberate second
+    /// scrub to a genuinely different region is not suppressed.
+    nonisolated private static let reseedTargetSimilarityBytes: Int64 = 10_000_000  // 10 MB
 
     /// Reset value for `lastExplicitSeekAt` on `stopPlayback()` paths. Returns
     /// `CFAbsoluteTimeGetCurrent()` — never `0` (which corresponds to the
@@ -101,7 +179,24 @@ final class VideoDetailViewModel {
     private var cachingResourceLoader: CachingResourceLoader?
     private var lastVLCPosition: Double = 0
     private var lastVLCProgressSave: Date = .distantPast
-    private var isUsingDirectAsset = false
+    /// `true` when the active `AVURLAsset` streams directly from the server
+    /// (AirPlay-active path, AirPlay-swap mid-playback path, OR cachingURL-
+    /// conversion-failure fallback path) — i.e. the local `CachingResourceLoader`
+    /// is NOT driving byte-range I/O for the current asset.
+    ///
+    /// Read on the `progressQueue` (background) inside `evaluateReseedDispatch`
+    /// to short-circuit reseed dispatch when the cache is bypassed — writing
+    /// to `.main` while AVPlayer is on a direct asset wastes bandwidth on bytes
+    /// the player will never read. Writes happen on the MainActor in
+    /// `configureAsset` / `handleAirPlayBecameActive` / `stopPlayback`.
+    ///
+    /// `nonisolated(unsafe)` + `progressStateLock`-guarded matches the existing
+    /// pattern of `streamingURL`, `authToken`, `lastReseedAt`, and
+    /// `lastReseedTargetByte`. All reads/writes MUST be inside
+    /// `progressStateLock.withLock { ... }` to avoid TSan-detectable data races
+    /// on the MainActor ⇄ progressQueue boundary.
+    @ObservationIgnored
+    nonisolated(unsafe) private var isUsingDirectAsset = false
     private var sessionCoordinator: PlayerSessionCoordinator?
     private var nowPlaying: NowPlayingController?
 
@@ -192,14 +287,11 @@ final class VideoDetailViewModel {
 
         let asset = configureAsset(url: url, videoId: video.youtubeId, token: token)
         let playerItem = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: [.tracks, .duration])
-        // Limit AVPlayer's internal forward buffer — our CacheStore already
-        // holds up to 256MB, so without this cap AVPlayer duplicates data into
-        // its own (unbounded) buffer and RAM grows unboundedly on large VBR
-        // files. 30s is enough headroom for stall-free playback while keeping
-        // the duplicate buffer bounded.
-        playerItem.preferredForwardBufferDuration = 30
+        configurePlayerItemAppetite(playerItem)
         let avPlayer = AVPlayer(playerItem: playerItem)
-        logger.notice("[Start] actionAtItemEnd=\(avPlayer.actionAtItemEnd.rawValue) startPosition=\(self.startPosition)s duration=\(video.duration)s isUsingDirectAsset=\(self.isUsingDirectAsset)")
+        let directAssetForLog = progressStateLock.withLock { self.isUsingDirectAsset }
+        logger.notice("[Start] actionAtItemEnd=\(avPlayer.actionAtItemEnd.rawValue) startPosition=\(self.startPosition)s duration=\(video.duration)s isUsingDirectAsset=\(directAssetForLog)")
+        logger.info("[Mem] start playback rss=\(MemoryDiagnostics.residentMBString())")
 
         if startPosition > 0 {
             let time = CMTime(seconds: startPosition, preferredTimescale: 600)
@@ -220,26 +312,349 @@ final class VideoDetailViewModel {
         startNowPlayingController(for: avPlayer, video: video)
     }
 
+    /// Locked write of `streamingURL` + `authToken` (and optionally
+    /// `isUsingDirectAsset`). Extracted from `configureAsset` so the snapshot
+    /// side-effect is unit-testable in isolation (no AVPlayer / asset
+    /// construction required). `internal` visibility — not `private` — so
+    /// `@testable import TAClient` can exercise it directly; in production
+    /// it is called from `configureAsset` (URL/token only — direct-asset bit
+    /// is written separately for compatibility with cachingURL fallback path)
+    /// and `handleAirPlayBecameActive` (all three atomically — see Step 0 of
+    /// `evaluateReseedDispatch`: the bypass flag MUST transition under the
+    /// same lock acquisition as the new URL/token, otherwise a 1Hz observer
+    /// tick can land between the snapshot and the flag write and dispatch
+    /// `reseedMain` with the direct-asset URL/token).
+    ///
+    /// Passing `isDirectAsset: nil` leaves `isUsingDirectAsset` untouched —
+    /// callers that want to write only the URL/token pair (e.g. `configureAsset`
+    /// at the top of the method, before its branch picks the asset shape) use
+    /// the default. Callers that need the three-field atomic transition pass
+    /// the explicit boolean.
+    func snapshotPlaybackContext(url: URL?, token: String?, isDirectAsset: Bool? = nil) {
+        progressStateLock.withLock {
+            self.streamingURL = url
+            self.authToken = token
+            if let isDirectAsset {
+                self.isUsingDirectAsset = isDirectAsset
+            }
+        }
+    }
+
+    /// Test-only setter for `isUsingDirectAsset`. Lets
+    /// `ReseedDispatchEvaluationTests` exercise the Step 0 direct-asset
+    /// bypass without having to wire a real `AVPlayer` + `AVURLAsset` into
+    /// the SUT. Writes under `progressStateLock` to match the production
+    /// contract. `internal` visibility — `@testable import TAClient` is the
+    /// only intended consumer.
+    func setDirectAssetState(_ value: Bool) {
+        progressStateLock.withLock {
+            self.isUsingDirectAsset = value
+        }
+    }
+
+    /// Applies AVPlayer "appetite caps" to a freshly-constructed
+    /// `AVPlayerItem` — limits both the peak bit rate AVPlayer will fetch and
+    /// the duration of pre-buffered media ahead of the playhead.
+    ///
+    /// **Why:** real-device test on a high-end iPad measured a ~3.89 GB RSS
+    /// spike during the first few seconds of 4K AV1 playback (cache was at
+    /// ~256 MB budget but AVPlayer's pipeline ate the rest). Root cause:
+    /// AVPlayer's `observedBitrate` mis-measures as multi-Gbps during the
+    /// initial HTTPS chunks of a single-rendition stream (no adaptive
+    /// ladder), and AVPlayer pre-fetches aggressively in response.
+    ///
+    /// - `preferredPeakBitRate = 25_000_000` (25 Mbps) — covers 4K AV1's
+    ///   typical 12-20 Mbps sustained envelope with headroom for VBR peaks.
+    ///   Any value below the bogus-Gbps measurement caps the appetite; 25
+    ///   Mbps was chosen empirically to avoid AVPlayer refusing single-
+    ///   rendition streams (no ladder to downshift to).
+    /// - `preferredForwardBufferDuration = 10` — our `CacheStore` already
+    ///   holds up to 256 MB, so AVPlayer duplicating that data into an
+    ///   unbounded internal buffer is wasted RAM. 10s is enough headroom
+    ///   for stall-free playback while keeping the duplicate buffer bounded.
+    ///   (Previously 30s; lowered as part of the appetite caps.)
+    ///
+    /// Full context + tuning escalation path in
+    /// `docs/plans/20260527-fix-memory-pressure-recovery.md` (Task 2).
+    ///
+    /// `internal` (not `private`) so `AVPlayerItemConfigurationTests` can
+    /// call directly via `@testable import TAClient` and pin both values.
+    /// `nonisolated` because the operation is pure side-effect on the
+    /// passed item; no shared state touched.
+    nonisolated func configurePlayerItemAppetite(_ item: AVPlayerItem) {
+        item.preferredPeakBitRate = 25_000_000
+        item.preferredForwardBufferDuration = 10
+    }
+
+    /// Result of `evaluateReseedDispatch` when a reseed should fire — bundles
+    /// the byte anchor and the auth context snapshotted under
+    /// `progressStateLock`. The caller (the 1Hz time observer closure)
+    /// dispatches `VideoCachePreloader.shared.reseedMain` with these values.
+    /// `internal` visibility so `@testable import` tests can inspect what the
+    /// evaluator decided without having to mock the preloader singleton.
+    struct ReseedDispatch: Equatable, Sendable {
+        let atByte: Int64
+        let url: URL
+        let token: String
+    }
+
+    /// Decides whether the current observer tick should trigger a reseed and,
+    /// if so, returns the dispatch payload (`atByte`, `url`, `token`).
+    ///
+    /// Side effects when returning `.some`: updates `lastReseedAt` and
+    /// `lastReseedTargetByte` under `progressStateLock` to "I'm dispatching
+    /// this target now" — so a follow-up tick within the debounce window with
+    /// a similar target sees the recent timestamp and short-circuits.
+    /// No side effects when returning `nil` (skip reseed for this tick).
+    ///
+    /// `internal` (not `private`) so `@testable import TAClient` can call
+    /// directly with a controlled `now` value and assert the field updates +
+    /// dispatch decision in isolation — same pattern as
+    /// `snapshotPlaybackContext`. In production this is only ever called from
+    /// the 1Hz time observer closure in `registerPlayerObservers`.
+    ///
+    /// Paused-player scrub semantics: this method does NOT consult AVPlayer's
+    /// `timeControlStatus` / `rate`. AVPlayer's periodic time observer fires
+    /// once after a discrete seek-while-paused (paused-scrub), so we still
+    /// want to reseed in that case — pre-warming the new region for the
+    /// resume-play is the intended behavior. The plan's "paused does NOT
+    /// block reseed" requirement is satisfied by this absence-of-check.
+    nonisolated func evaluateReseedDispatch(
+        currentSeconds: Double,
+        cachedVideoId: String,
+        duration: Double,
+        now: CFAbsoluteTime
+    ) -> ReseedDispatch? {
+        // Step 0: direct-asset bypass (AirPlay / cachingURL-fallback path).
+        if checkDirectAssetBypass() { return nil }
+
+        // Step 1: store lookup. Step 2: seconds-space trigger. Step 3: byte
+        // mapping for the dispatch target. All three are pure once we have
+        // the store snapshot, and they share a return-nil short-circuit.
+        guard let targetByte = computeReseedTargetByte(
+            currentSeconds: currentSeconds,
+            cachedVideoId: cachedVideoId,
+            duration: duration
+        ) else { return nil }
+
+        // Step 4: locked debounce-and-snapshot commit.
+        return commitReseedDispatch(targetByte: targetByte, now: now)
+    }
+
+    /// Step 0 of `evaluateReseedDispatch`. Returns `true` when AVPlayer is
+    /// reading straight from the server URL (AirPlay, AirPlay-swap, or
+    /// `CachingResourceLoader.cachingURL` fallback) — in which case
+    /// `reseedMain` would download bytes the player never reads.
+    ///
+    /// Read under `progressStateLock` to match the `nonisolated(unsafe)`
+    /// write contract on `isUsingDirectAsset`: writes happen on the MainActor
+    /// (`configureAsset`, `handleAirPlayBecameActive`, `stopPlayback`); this
+    /// read happens on `progressQueue` (background).
+    nonisolated private func checkDirectAssetBypass() -> Bool {
+        progressStateLock.withLock { self.isUsingDirectAsset }
+    }
+
+    /// Steps 1–3 of `evaluateReseedDispatch`. Reads the `.main` region from
+    /// the store, runs the seconds-space `ReseedTrigger.shouldReseed` gate,
+    /// and maps `currentSeconds` → byte anchor via the same
+    /// `seconds * avgByterate` formula used elsewhere (`logCacheHealth`, the
+    /// `currentByte` discussion in CLAUDE.md). Returns `nil` for any of:
+    /// missing entry, videoId mismatch, small-file case, in-region position,
+    /// or `duration <= 0`. The preloader's `reseedMain` re-clamps into
+    /// `[prefixEnd, totalSize]` so VBR slop on the byte mapping is harmless.
+    nonisolated private func computeReseedTargetByte(
+        currentSeconds: Double,
+        cachedVideoId: String,
+        duration: Double
+    ) -> Int64? {
+        guard let mainStatus = VideoCachePreloader.shared.store.regionStatus(
+            videoId: cachedVideoId,
+            region: .main
+        ) else { return nil }
+
+        guard ReseedTrigger.shouldReseed(
+            currentSeconds: currentSeconds,
+            mainStartOffset: mainStatus.startOffset,
+            mainEndOffset: mainStatus.endOffset,
+            totalSize: mainStatus.totalSize,
+            duration: duration
+        ) else { return nil }
+
+        guard duration > 0 else { return nil }
+        let avgByterate = Double(mainStatus.totalSize) / duration
+        return Int64(currentSeconds * avgByterate)
+    }
+
+    /// Step 4 of `evaluateReseedDispatch`. Performs the locked debounce
+    /// check + snapshot read + field update in a single `progressStateLock`
+    /// acquisition so the four scalars (`lastReseedAt`,
+    /// `lastReseedTargetByte`, `streamingURL`, `authToken`) are read/written
+    /// atomically — no chance of a rapid re-tick observing partially-updated
+    /// state.
+    ///
+    /// **Pair-check inside the lock** (not after): the debounce timestamps
+    /// must ONLY advance when we are committing to dispatch. If we advanced
+    /// them and then bailed because `streamingURL` or `authToken` was nil
+    /// (e.g. `stopPlayback` cleared them concurrently), a fresh valid tick
+    /// landing at the SAME `targetByte` within `reseedDebounceInterval`
+    /// would be incorrectly debounced — silently dropping the reseed
+    /// dispatch the user actually needs. Reading the pair inside the lock +
+    /// advancing timestamps ONLY when the pair is non-nil guarantees
+    /// timestamp updates and dispatch decisions are inseparable.
+    nonisolated private func commitReseedDispatch(targetByte: Int64, now: CFAbsoluteTime) -> ReseedDispatch? {
+        progressStateLock.withLock { () -> ReseedDispatch? in
+            if ReseedTrigger.shouldDebounce(
+                now: now,
+                lastReseedAt: self.lastReseedAt,
+                targetByte: targetByte,
+                lastTargetByte: self.lastReseedTargetByte,
+                debounceInterval: Self.reseedDebounceInterval,
+                similarityBytes: Self.reseedTargetSimilarityBytes
+            ) {
+                return nil
+            }
+            // Guard `url != nil && token != nil` BEFORE advancing timestamps.
+            // Both are set together in `configureAsset` and cleared together
+            // in `stopPlayback`, so in practice they are always both nil or
+            // both non-nil. The defensive pair-check guards against a future
+            // refactor that diverges them — AND against a `stopPlayback`-
+            // cleared snapshot landing here mid-tick.
+            guard let url = self.streamingURL, let token = self.authToken else {
+                return nil
+            }
+            self.lastReseedAt = now
+            self.lastReseedTargetByte = targetByte
+            return ReseedDispatch(atByte: targetByte, url: url, token: token)
+        }
+    }
+
+    /// Result of `evaluateRestartDispatch` when a restart should fire —
+    /// bundles the videoId + auth context + playhead anchor snapshotted
+    /// under `progressStateLock`. The caller (the 1Hz time observer closure)
+    /// dispatches `VideoCachePreloader.shared.restartPreloadIfNeeded` with
+    /// these values fire-and-forget, mirroring the `ReseedDispatch` shape.
+    struct RestartDispatch: Equatable, Sendable {
+        let videoId: String
+        let url: URL
+        let token: String
+        let startPosition: Double
+        let duration: Double
+    }
+
+    /// Decides whether the current observer tick should trigger a
+    /// preload-restart and, if so, returns the dispatch payload
+    /// (`videoId`, `url`, `token`, `startPosition`, `duration`).
+    ///
+    /// Mirrors `evaluateReseedDispatch`'s testable-seam shape — same
+    /// nonisolated `@testable`-callable contract, same pair-check-inside-
+    /// lock invariant for the timestamp side-effect, same Step 0
+    /// direct-asset bypass.
+    ///
+    /// Side effect when returning `.some`: updates `lastRestartAt` under
+    /// `progressStateLock` to "I'm dispatching now" — so a follow-up tick
+    /// within the cooldown window sees the recent timestamp and is
+    /// short-circuited by `RestartTrigger.shouldRestart`.
+    /// No side effects when returning `nil`.
+    ///
+    /// `internal` visibility (not `private`) so `RestartDispatchEvaluationTests`
+    /// can call directly with a controlled `now` value and assert the field
+    /// updates + dispatch decision in isolation — same pattern as
+    /// `evaluateReseedDispatch`.
+    ///
+    /// `startPosition` in the returned dispatch is the `currentSeconds`
+    /// argument verbatim — restart is anchored at the current playhead,
+    /// NOT byte 0. This is load-bearing for the `.critical` recovery flow
+    /// where the cache rebuilds from where the user actually is.
+    nonisolated func evaluateRestartDispatch(
+        cachedVideoId: String,
+        currentSeconds: Double,
+        duration: Double,
+        now: CFAbsoluteTime
+    ) -> RestartDispatch? {
+        // Step 0: direct-asset bypass (AirPlay / cachingURL-fallback path).
+        // Same rationale as `evaluateReseedDispatch`: spawning a preload
+        // restart while AVPlayer streams directly wastes bandwidth on bytes
+        // the player never reads.
+        if checkDirectAssetBypass() { return nil }
+
+        // Step 1: small-file short-circuit. When `totalSize <= prefixSize`
+        // no `.main` region is ever created; `regionStatus(.main)` returns
+        // nil forever, and the predicate's `?? 0` fallback would make
+        // `mainBytes = 0 < threshold` true on every tick after the cooldown
+        // elapses. Without this guard, small files spawn a restart-and-wipe
+        // loop every 15 s (the actor's `setEntry` inside `startPreloadWithRetry`
+        // wipes whatever prefix bytes had accumulated). The whole file
+        // already lives in `.prefix`; there is nothing for a restart to do.
+        // See code-review "small-file infinite restart loop" finding.
+        let mainStatus = VideoCachePreloader.shared.store.regionStatus(
+            videoId: cachedVideoId,
+            region: .main
+        )
+        guard let mainStatus else { return nil }
+        let mainBytes: Int64 = mainStatus.endOffset - mainStatus.startOffset
+
+        // Step 2: locked snapshot + pair-check + cooldown predicate + timestamp
+        // update — all under a single lock acquisition so the read/check/write
+        // is atomic against any concurrent commit. Matches
+        // `commitReseedDispatch`'s combined-acquisition contract (see code
+        // review "cooldown read-then-write is not atomic" finding). The
+        // timestamp only advances when we are committing to dispatch — if it
+        // advanced and then we bailed because URL/token was nil, a fresh
+        // valid tick within the 15 s cooldown would be incorrectly throttled.
+        return progressStateLock.withLock { () -> RestartDispatch? in
+            guard RestartTrigger.shouldRestart(
+                mainCachedByteCount: mainBytes,
+                lastRestartAt: self.lastRestartAt,
+                now: now
+            ) else { return nil }
+            guard let url = self.streamingURL, let token = self.authToken else {
+                return nil
+            }
+            self.lastRestartAt = now
+            return RestartDispatch(
+                videoId: cachedVideoId,
+                url: url,
+                token: token,
+                startPosition: currentSeconds,
+                duration: duration
+            )
+        }
+    }
+
     /// Builds the `AVURLAsset` according to the active route. Side effects
-    /// (setting `isUsingDirectAsset`, retaining the caching loader) live here
-    /// so the caller stays declarative.
+    /// (setting `isUsingDirectAsset`, retaining the caching loader, snapshotting
+    /// the streaming URL + token for the 1Hz reseed trigger) live here so the
+    /// caller stays declarative. Snapshotting at the asset-construction
+    /// chokepoint — called by both `startAVPlayback` AND
+    /// `handleAirPlayBecameActive` — guarantees reseed always dispatches with
+    /// the auth context of the currently-playing asset.
     private func configureAsset(url: URL, videoId: String, token: String) -> AVURLAsset {
+        // Snapshot URL/token AND isUsingDirectAsset atomically — the fused
+        // overload writes all three under one `progressStateLock` acquisition.
+        // Passing the explicit boolean here (rather than relying on a
+        // post-snapshot assignment) guarantees that a 1Hz observer tick on
+        // `progressQueue` cannot observe a torn state where the new URL/token
+        // pair is visible but the bypass flag still reflects the previous
+        // asset's mode.
         if isAirPlayActive() {
-            isUsingDirectAsset = true
+            snapshotPlaybackContext(url: url, token: token, isDirectAsset: true)
             return AVURLAsset(
                 url: url,
                 options: ["AVURLAssetHTTPHeaderFieldsKey": ["Authorization": "Token \(token)"]]
             )
         }
         if let cachingURL = CachingResourceLoader.cachingURL(from: url) {
+            snapshotPlaybackContext(url: url, token: token, isDirectAsset: false)
             let loader = CachingResourceLoader(videoId: videoId, originalURL: url, token: token)
             let avAsset = AVURLAsset(url: cachingURL)
             avAsset.resourceLoader.setDelegate(loader, queue: loader.loaderQueue)
             self.cachingResourceLoader = loader
-            isUsingDirectAsset = false
             return avAsset
         }
-        isUsingDirectAsset = true
+        // cachingURL conversion failed — fall back to direct-streaming asset
+        // with the same auth options the AirPlay path uses. Atomically set
+        // the direct-asset bit alongside the URL/token snapshot.
+        snapshotPlaybackContext(url: url, token: token, isDirectAsset: true)
         return AVURLAsset(
             url: url,
             options: ["AVURLAssetHTTPHeaderFieldsKey": ["Authorization": "Token \(token)"]]
@@ -265,6 +680,54 @@ final class VideoDetailViewModel {
                 self.logCacheHealth(videoId: cachedVideoId, playbackPosition: seconds, duration: duration)
                 Task { @MainActor in
                     self.nowPlaying?.refresh()
+                }
+                // Reseed trigger: if playback has jumped far outside the cached
+                // `.main` region (large forward or backward scrub), ask the
+                // preloader to drop and re-anchor `.main` at the new byte.
+                // `evaluateReseedDispatch` is side-effect-only when it returns
+                // `nil` (no dispatch); on a `.some`, it has already updated the
+                // debounce scalars under the lock and snapshotted url/token —
+                // the only thing left for us to do here is fire-and-forget the
+                // actor hop to `reseedMain`.
+                if let dispatch = self.evaluateReseedDispatch(
+                    currentSeconds: seconds,
+                    cachedVideoId: cachedVideoId,
+                    duration: duration,
+                    now: CFAbsoluteTimeGetCurrent()
+                ) {
+                    Task {
+                        await VideoCachePreloader.shared.reseedMain(
+                            videoId: cachedVideoId,
+                            atByte: dispatch.atByte,
+                            url: dispatch.url,
+                            token: dispatch.token
+                        )
+                    }
+                }
+                // Restart hook: parallel check to the reseed dispatch above.
+                // Fires when `.main` has shrunk below 16 MB (post `.critical`
+                // emergency-trim or after the entry was dropped entirely)
+                // AND the 15 s cooldown has elapsed. The restart is anchored
+                // at the current playhead, not byte 0 — the cache rebuilds
+                // where the user actually is. `restartPreloadIfNeeded` is
+                // idempotent on the preloader side; the VM's `lastRestartAt`
+                // cooldown is the single throttle. See
+                // `docs/plans/20260527-fix-memory-pressure-recovery.md` Task 6.
+                if let restartContext = self.evaluateRestartDispatch(
+                    cachedVideoId: cachedVideoId,
+                    currentSeconds: seconds,
+                    duration: duration,
+                    now: CFAbsoluteTimeGetCurrent()
+                ) {
+                    Task {
+                        await VideoCachePreloader.shared.restartPreloadIfNeeded(
+                            videoId: restartContext.videoId,
+                            url: restartContext.url,
+                            token: restartContext.token,
+                            startPosition: restartContext.startPosition,
+                            duration: restartContext.duration
+                        )
+                    }
                 }
             }
         }
@@ -382,9 +845,33 @@ final class VideoDetailViewModel {
             forName: AVPlayerItem.newAccessLogEntryNotification,
             object: item,
             queue: .main
-        ) { [weak item] _ in
-            guard let item, let event = item.accessLog()?.events.last else { return }
-            logger.info("[AVAccess] indicatedBitrate=\(Int(event.indicatedBitrate)) observedBitrate=\(Int(event.observedBitrate)) stalls=\(event.numberOfStalls) droppedFrames=\(event.numberOfDroppedVideoFrames) durationWatched=\(String(format: "%.1f", event.durationWatched)) playbackType=\(event.playbackType ?? "?")")
+        ) { [weak self, weak item] _ in
+            guard let self, let item, let event = item.accessLog()?.events.last else { return }
+            // 30 s throttle: AVPlayer posts an entry on every byte-range
+            // completion (many per second during AV1 4K start). The
+            // diagnostic value is in the trend; the firehose just clogs
+            // the captured log. Mirrors `lastCacheLogTime`'s pattern.
+            let now = CFAbsoluteTimeGetCurrent()
+            let should: Bool = self.progressStateLock.withLock {
+                if (now - self.lastAVAccessLogAt) >= 30 {
+                    self.lastAVAccessLogAt = now
+                    return true
+                }
+                return false
+            }
+            guard should else { return }
+            // bytesTransferred / transferDuration are -1 when AVPlayer hasn't
+            // populated them yet for this event; only surface when both are
+            // valid so the marker stays parseable.
+            let bytes = event.numberOfBytesTransferred
+            let xferDuration = event.transferDuration
+            let transferField: String
+            if bytes >= 0 && xferDuration >= 0 {
+                transferField = " bytesTransferred=\(bytes) transferDuration=\(String(format: "%.2f", xferDuration))s"
+            } else {
+                transferField = ""
+            }
+            logger.info("[AVAccess] indicatedBitrate=\(Int(event.indicatedBitrate)) observedBitrate=\(Int(event.observedBitrate)) stalls=\(event.numberOfStalls) droppedFrames=\(event.numberOfDroppedVideoFrames) durationWatched=\(String(format: "%.1f", event.durationWatched)) playbackType=\(event.playbackType ?? "?")\(transferField)")
         }
         observerBag.addNotification(accessToken)
 
@@ -474,12 +961,26 @@ final class VideoDetailViewModel {
     /// active — receivers cannot resolve the custom `itacache://` scheme, and
     /// Apple does not allow passing Authorization headers with AirPlay.
     private func handleAirPlayBecameActive() {
-        guard !isUsingDirectAsset,
+        let alreadyDirect = progressStateLock.withLock { self.isUsingDirectAsset }
+        guard !alreadyDirect,
               let player, let video,
               let url = URL(string: video.mediaUrl),
               let token = authState.token else { return }
 
         let currentTime = player.currentTime()
+
+        // Atomically refresh URL/token AND flip the direct-asset bit BEFORE
+        // calling `replaceCurrentItem`. The fused snapshot guarantees that a
+        // concurrent 1Hz observer tick on `progressQueue` cannot observe
+        // partial state — either it sees the OLD asset's context (no reseed
+        // races) or the NEW direct-asset context (Step 0 bypass fires). The
+        // previous "snapshot URL/token, then several lines later flip the
+        // bit" sequence left an ~11-line window where the bypass flag was
+        // stale (still `false`) but the URL/token already pointed at the
+        // direct-streaming URL — a tick landing in that window would dispatch
+        // `reseedMain` with the direct asset's auth context, downloading
+        // bytes AVPlayer would never read.
+        snapshotPlaybackContext(url: url, token: token, isDirectAsset: true)
 
         let asset = AVURLAsset(
             url: url,
@@ -490,7 +991,6 @@ final class VideoDetailViewModel {
         recordSeek("[Seek] reason=airplaySwap to=\(String(format: "%.2f", currentTime.seconds))s")
         player.seek(to: currentTime, toleranceBefore: .zero, toleranceAfter: .zero)
         cachingResourceLoader = nil
-        isUsingDirectAsset = true
 
         // Re-register every per-item observer on the replacement item. The
         // prior item's notification observers are scoped to that object and
@@ -777,7 +1277,7 @@ final class VideoDetailViewModel {
             level = "OK"
         }
 
-        logger.info("[Cache] \(level) pos=\(Int(playbackPosition))s ahead=\(String(format: "%.0f", effectiveAhead))s cached=\(cachePercent)% range=\(status.startOffset)-\(status.endOffset)/\(status.totalSize)")
+        logger.info("[Cache] \(level) pos=\(Int(playbackPosition))s ahead=\(String(format: "%.0f", effectiveAhead))s cached=\(cachePercent)% range=\(status.startOffset)-\(status.endOffset)/\(status.totalSize) rss=\(MemoryDiagnostics.residentMBString())")
     }
 
     // MARK: - AirPlay
@@ -942,7 +1442,11 @@ final class VideoDetailViewModel {
         nowPlaying = nil
         sessionCoordinator?.stop()
         sessionCoordinator = nil
-        isUsingDirectAsset = false
+        // `isUsingDirectAsset = false` happens later inside the
+        // `progressStateLock` block alongside the URL/token/timestamp clears
+        // — keeps the write contract consistent (every mutation of
+        // `isUsingDirectAsset` is lock-guarded so the background-queue read
+        // in `evaluateReseedDispatch` cannot race).
         // Single call tears down every KVO + notification token registered
         // during startAVPlayback / observePlayerStatus / observeFailedToPlayToEnd
         // / handleAirPlayBecameActive. Idempotent — deinit may also call it.
@@ -982,6 +1486,17 @@ final class VideoDetailViewModel {
             // wrapper so the contract is unit-testable without needing to
             // wire a real `AVPlayer` into a VM SUT.
             lastExplicitSeekAt = Self.resetExplicitSeekTimestamp()
+            // Clear the snapshot taken by `configureAsset` so the 1Hz reseed
+            // trigger's nil-guard short-circuits after teardown. Intentionally
+            // do NOT reset `lastReseedAt` / `lastReseedTargetByte` — they're
+            // stateless across stops and a stale 2s debounce window is
+            // harmless once playback ends.
+            streamingURL = nil
+            authToken = nil
+            // Reset the direct-asset bypass flag under the same lock — keeps
+            // every mutation of this field consistent with its
+            // `nonisolated(unsafe)` + `progressStateLock`-guarded contract.
+            isUsingDirectAsset = false
             progressStateLock.unlock()
             let seconds = player.currentTime().seconds
             if seconds.isFinite && seconds > 0 && seconds > lastSaved + 0.5 {

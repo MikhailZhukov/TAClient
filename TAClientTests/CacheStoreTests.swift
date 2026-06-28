@@ -30,13 +30,13 @@ import Foundation
         return Data(bytes)
     }
 
-    /// Seed the store with a fresh entry and write `payload` into the named
+    /// Set up a fresh entry AND fill it: writes `payload` into the named
     /// region as a sequence of fixed-size chunks. Defaults to writing into
     /// `.prefix` and using a `totalSize` that fits inside the prefix lower
     /// bound (8 MB) so only the prefix region is created — keeps single-region
     /// tests simple. Pass a larger `totalSize` (with a `region: .main` and a
     /// matching `resumeByte`) to drive multi-region scenarios.
-    private static func seed(
+    private static func setEntryAndFill(
         store: CacheStore,
         videoId: String,
         totalSize: Int64? = nil,
@@ -67,7 +67,7 @@ import Foundation
     @Test func readData_happyPath_returnsExactBytes() {
         let store = CacheStore()
         let payload = Self.makePayload(size: 4096)
-        Self.seed(store: store, videoId: "v", payload: payload)
+        Self.setEntryAndFill(store: store, videoId: "v", payload: payload)
 
         let slice = store.readData(videoId: "v", offset: 100, length: 256)
         #expect(slice?.count == 256)
@@ -78,7 +78,7 @@ import Foundation
         let store = CacheStore()
         // Size chosen to straddle the 512KB chunk boundary
         let payload = Self.makePayload(size: 600 * 1024)
-        Self.seed(store: store, videoId: "v", payload: payload)
+        Self.setEntryAndFill(store: store, videoId: "v", payload: payload)
 
         let offset: Int64 = Int64(CacheStore.chunkSize) - 128
         let slice = store.readData(videoId: "v", offset: offset, length: 256)
@@ -90,7 +90,7 @@ import Foundation
     @Test func readData_lengthLargerThanAvailable_returnsOnlyAvailable() {
         let store = CacheStore()
         let payload = Self.makePayload(size: 1024)
-        Self.seed(store: store, videoId: "v", payload: payload)
+        Self.setEntryAndFill(store: store, videoId: "v", payload: payload)
 
         // Request beyond end: should clamp to what's available.
         let slice = store.readData(videoId: "v", offset: 900, length: 4096)
@@ -101,7 +101,7 @@ import Foundation
     @Test func readData_offsetPastEnd_returnsNil() {
         let store = CacheStore()
         let payload = Self.makePayload(size: 1024)
-        Self.seed(store: store, videoId: "v", payload: payload)
+        Self.setEntryAndFill(store: store, videoId: "v", payload: payload)
 
         #expect(store.readData(videoId: "v", offset: 1025, length: 16) == nil)
         #expect(store.readData(videoId: "v", offset: 1024, length: 16) == nil) // exactly at end
@@ -110,7 +110,7 @@ import Foundation
     @Test func readData_negativeOffset_returnsNil() {
         let store = CacheStore()
         let payload = Self.makePayload(size: 1024)
-        Self.seed(store: store, videoId: "v", payload: payload)
+        Self.setEntryAndFill(store: store, videoId: "v", payload: payload)
 
         #expect(store.readData(videoId: "v", offset: -1, length: 16) == nil)
     }
@@ -144,7 +144,7 @@ import Foundation
     @Test func readData_wrongVideoId_returnsNil() {
         let store = CacheStore()
         let payload = Self.makePayload(size: 1024)
-        Self.seed(store: store, videoId: "v", payload: payload)
+        Self.setEntryAndFill(store: store, videoId: "v", payload: payload)
 
         #expect(store.readData(videoId: "other", offset: 0, length: 16) == nil)
     }
@@ -165,7 +165,7 @@ import Foundation
         let prefixSize = CacheStore.computePrefixSize(totalSize: totalSize)
         let resumeByte = prefixSize + 1_000
         let payload = Self.makePayload(size: 2048)
-        Self.seed(
+        Self.setEntryAndFill(
             store: store,
             videoId: "v",
             totalSize: totalSize,
@@ -184,14 +184,14 @@ import Foundation
     @Test func cacheStatus_wrongVideoId_returnsNil() {
         let store = CacheStore()
         let payload = Self.makePayload(size: 1024)
-        Self.seed(store: store, videoId: "v", payload: payload)
+        Self.setEntryAndFill(store: store, videoId: "v", payload: payload)
         #expect(store.cacheStatus(videoId: "other") == nil)
     }
 
     @Test func cachedByteCount_reflectsWrittenChunks() {
         let store = CacheStore()
         let payload = Self.makePayload(size: 3_000)
-        Self.seed(store: store, videoId: "v", payload: payload, chunkSize: 512)
+        Self.setEntryAndFill(store: store, videoId: "v", payload: payload, chunkSize: 512)
 
         #expect(store.cachedByteCount(videoId: "v") == 3_000)
         #expect(store.cachedByteCount(videoId: "other") == 0)
@@ -200,7 +200,7 @@ import Foundation
     @Test func currentVideoId_reflectsActiveEntry() {
         let store = CacheStore()
         #expect(store.currentVideoId() == nil)
-        Self.seed(store: store, videoId: "v", payload: Self.makePayload(size: 64))
+        Self.setEntryAndFill(store: store, videoId: "v", payload: Self.makePayload(size: 64))
         #expect(store.currentVideoId() == "v")
         store.clear()
         #expect(store.currentVideoId() == nil)
@@ -256,7 +256,7 @@ import Foundation
     @Test func trimFront_whenBelowMaxCacheSize_isNoOp() {
         let store = CacheStore()
         // Well below maxCacheSize (256MB) -> nothing to trim.
-        Self.seed(store: store, videoId: "v", payload: Self.makePayload(size: 10 * 1024))
+        Self.setEntryAndFill(store: store, videoId: "v", payload: Self.makePayload(size: 10 * 1024))
         // Set a playback offset that would otherwise be "trim eligible".
         store.updatePlaybackPosition(videoId: "v", seconds: 100, duration: 100)
 
@@ -267,7 +267,7 @@ import Foundation
 
     @Test func trimFront_wrongVideoId_returnsZero() {
         let store = CacheStore()
-        Self.seed(store: store, videoId: "v", payload: Self.makePayload(size: 1024))
+        Self.setEntryAndFill(store: store, videoId: "v", payload: Self.makePayload(size: 1024))
         let removed = store.trimFront(videoId: "nope")
         #expect(removed == 0)
     }
@@ -286,7 +286,7 @@ import Foundation
         let store = CacheStore()
         let totalSize: Int64 = 100 * 1024 * 1024
         let prefixSize = CacheStore.computePrefixSize(totalSize: totalSize)
-        Self.seed(
+        Self.setEntryAndFill(
             store: store,
             videoId: "v",
             totalSize: totalSize,
@@ -322,7 +322,7 @@ import Foundation
 
     @Test func emergencyTrim_wrongVideoId_returnsZero() {
         let store = CacheStore()
-        Self.seed(store: store, videoId: "v", payload: Self.makePayload(size: 10_000))
+        Self.setEntryAndFill(store: store, videoId: "v", payload: Self.makePayload(size: 10_000))
         let removed = store.emergencyTrim(videoId: "nope", targetSize: 0)
         #expect(removed == 0)
         #expect(store.cachedByteCount(videoId: "v") == 10_000)
@@ -332,7 +332,7 @@ import Foundation
 
     @Test func clear_emptiesEverything() {
         let store = CacheStore()
-        Self.seed(store: store, videoId: "v", payload: Self.makePayload(size: 1024))
+        Self.setEntryAndFill(store: store, videoId: "v", payload: Self.makePayload(size: 1024))
         // Small payload → only prefix exists; cacheStatus returns nil already
         // because there's no `.main`. Use `regionStatus` to assert the entry
         // is real before the clear.
@@ -356,7 +356,7 @@ import Foundation
 
     @Test func updatePlaybackPosition_isNoOpForZeroDuration() {
         let store = CacheStore()
-        Self.seed(store: store, videoId: "v", payload: Self.makePayload(size: 1024))
+        Self.setEntryAndFill(store: store, videoId: "v", payload: Self.makePayload(size: 1024))
         store.updatePlaybackPosition(videoId: "v", seconds: 10, duration: 0)
         // No crash; reads still work.
         #expect(store.readData(videoId: "v", offset: 0, length: 16)?.count == 16)
@@ -938,7 +938,7 @@ import Foundation
         let prefixSize = CacheStore.computePrefixSize(totalSize: totalSize)
         let resumeByte = prefixSize + 4096
         let payload = Self.makePayload(size: 8 * 1024)
-        Self.seed(
+        Self.setEntryAndFill(
             store: store,
             videoId: "v",
             totalSize: totalSize,
@@ -971,11 +971,14 @@ import Foundation
         #expect(slice == payload.suffix(1))
     }
 
-    @Test func setEntry_sameVideoId_replacesRegionsAndResetsPlayback() {
-        // Re-`setEntry` for the same videoId must replace the regions
-        // entirely (old chunks gone) and reset the playback-position
-        // tracker. Otherwise a stale `lastPlaybackOffset` from the previous
-        // session could survive into the new entry and influence trim math.
+    @Test func setEntry_sameVideoId_differentTotalSize_replacesRegionsAndResetsPlayback() {
+        // Re-`setEntry` for the same videoId with a DIFFERENT totalSize
+        // (e.g. server returned a re-encoded smaller variant) must replace
+        // the regions entirely (old chunks gone) and reset the
+        // playback-position tracker. The same-(videoId, totalSize,
+        // contentType) idempotency path (see
+        // `setEntry_idempotent_whenSameVideoIdTotalSizeContentType_preservesRegions`)
+        // does NOT apply here because `totalSize` differs.
         let store = CacheStore()
         let totalSize: Int64 = 200 * 1024 * 1024
         let prefixSize = CacheStore.computePrefixSize(totalSize: totalSize)
@@ -1013,6 +1016,85 @@ import Foundation
         // We can't read `lastPlaybackOffset` directly, but its observable
         // effect through `trimFront` confirms the reset.
         #expect(store.trimFront(videoId: "v") == 0)
+    }
+
+    /// Same-(videoId, totalSize, contentType) `setEntry` calls are
+    /// idempotent: regions, chunks, and `lastPlaybackOffset` survive. This
+    /// is load-bearing for the `.critical` → `restartPreloadIfNeeded` →
+    /// `startPreloadWithRetry` → `downloadVideo` chain — the restart hook
+    /// calls `resetMainRegion` to re-anchor `.main` at the new playhead
+    /// while preserving `.prefix`, then `downloadVideo` re-calls `setEntry`
+    /// with identical params from the HEAD probe. Without idempotency, the
+    /// `.prefix` bytes the soft-`.critical` policy preserved would be
+    /// wiped, opening a moov-cache-miss window where scrub-after-resume
+    /// can re-trigger the freeze the two-region architecture exists to
+    /// prevent.
+    @Test func setEntry_idempotent_whenSameVideoIdTotalSizeContentType_preservesRegions() {
+        let store = CacheStore()
+        let totalSize: Int64 = 200 * 1024 * 1024 // 200 MB → both regions
+        let prefixSize = CacheStore.computePrefixSize(totalSize: totalSize)
+        let resumeByte = prefixSize
+        store.setEntry(
+            videoId: "v",
+            totalSize: totalSize,
+            contentType: "video/mp4",
+            resumeByte: resumeByte
+        )
+        _ = store.writeChunk(videoId: "v", toRegion: .prefix, chunk: Data(repeating: 0xAA, count: 8 * 1024 * 1024))
+        _ = store.writeChunk(videoId: "v", toRegion: .main, chunk: Data(repeating: 0xBB, count: 50 * 1024 * 1024))
+        // Set lastPlaybackOffset to a known value so we can confirm it survived.
+        // The observable effect is via trimFront — with a high playback offset
+        // and 50 MB of main bytes, trimFront would shed > 0 bytes if not reset.
+        let duration: Double = 100
+        store.updatePlaybackPosition(videoId: "v", seconds: 50, duration: duration)
+
+        let prefixBefore = store.regionStatus(videoId: "v", region: .prefix)!
+        let mainBefore = store.regionStatus(videoId: "v", region: .main)!
+        let cachedBefore = store.cachedByteCount(videoId: "v")
+        #expect(prefixBefore.endOffset > 0, "precondition: prefix must be populated")
+        #expect(mainBefore.endOffset > mainBefore.startOffset, "precondition: main must be populated")
+        #expect(cachedBefore > 0)
+
+        // Same-(videoId, totalSize, contentType) re-call. Even with a
+        // DIFFERENT resumeByte, this MUST be a no-op — the caller is
+        // expected to use `resetMainRegion` for anchor changes.
+        store.setEntry(
+            videoId: "v",
+            totalSize: totalSize,
+            contentType: "video/mp4",
+            resumeByte: resumeByte + 5_000_000
+        )
+
+        let prefixAfter = store.regionStatus(videoId: "v", region: .prefix)!
+        let mainAfter = store.regionStatus(videoId: "v", region: .main)!
+        let cachedAfter = store.cachedByteCount(videoId: "v")
+
+        #expect(prefixAfter.startOffset == prefixBefore.startOffset)
+        #expect(prefixAfter.endOffset == prefixBefore.endOffset, "prefix.endOffset must be preserved by idempotent setEntry")
+        #expect(mainAfter.startOffset == mainBefore.startOffset, "main.startOffset must be preserved by idempotent setEntry")
+        #expect(mainAfter.endOffset == mainBefore.endOffset, "main.endOffset must be preserved by idempotent setEntry")
+        #expect(cachedAfter == cachedBefore, "cachedByteCount must be unchanged by idempotent setEntry")
+
+        // lastPlaybackOffset survival — observable via trimFront. If
+        // lastPlaybackOffset had been reset to 0, trimFront would have no
+        // safe trim margin and return 0. We expect > 0 (trim fires).
+        let trimmed = store.trimFront(videoId: "v")
+        #expect(trimmed > 0, "lastPlaybackOffset must survive idempotent setEntry — trimFront must still find safe margin")
+    }
+
+    /// A `contentType` mismatch (different MIME, e.g. server switched the
+    /// transcoded variant) still busts the cache — the new content is not
+    /// the same bytes, so old chunks are invalid.
+    @Test func setEntry_sameVideoIdAndTotalSize_butDifferentContentType_replaces() {
+        let store = CacheStore()
+        let totalSize: Int64 = 200 * 1024 * 1024
+        store.setEntry(videoId: "v", totalSize: totalSize, contentType: "video/mp4", resumeByte: 0)
+        _ = store.writeChunk(videoId: "v", toRegion: .prefix, chunk: Data(repeating: 0xAA, count: 1024))
+        #expect(store.cachedByteCount(videoId: "v") == 1024)
+
+        store.setEntry(videoId: "v", totalSize: totalSize, contentType: "video/webm", resumeByte: 0)
+        // contentType changed → entry replaced → chunks dropped.
+        #expect(store.cachedByteCount(videoId: "v") == 0)
     }
 
     @Test func setEntry_resumeBytePastTotalSize_clampsAndSkipsMain() {
@@ -1093,5 +1175,240 @@ import Foundation
         // main.startOffset still >= original resumeByte (we never go before
         // where we initially started — trim only moves forward).
         #expect(mainStartAfter >= resumeByte)
+    }
+
+    // MARK: - resetMainRegion (reseed-after-large-scrub)
+
+    /// Replace `.main` with a fresh empty region anchored at the new byte while
+    /// leaving `.prefix` untouched (moov-atom protection). Prefix bytes and
+    /// metadata survive intact; main is empty at the new offset.
+    @Test func resetMain_replacesMain_keepsPrefix() {
+        let store = CacheStore()
+        let totalSize: Int64 = 200 * 1024 * 1024  // 200 MB → both regions
+        let prefixSize = CacheStore.computePrefixSize(totalSize: totalSize)
+        let resumeByte: Int64 = 80 * 1024 * 1024
+        store.setEntry(videoId: "v", totalSize: totalSize, contentType: "video/mp4", resumeByte: resumeByte)
+        // Prefix: 8 MB written (full to prefixSize).
+        Self.writeChunksToRegion(store: store, videoId: "v", region: .prefix, bytes: Int(prefixSize), byte: 0xAA)
+        // Main: 4 MB written at resumeByte.
+        Self.writeChunksToRegion(store: store, videoId: "v", region: .main, bytes: 4 * 1024 * 1024, byte: 0xBB)
+
+        let prefixBefore = store.regionStatus(videoId: "v", region: .prefix)
+        store.resetMainRegion(videoId: "v", newStartOffset: 120 * 1024 * 1024)
+        let prefixAfter = store.regionStatus(videoId: "v", region: .prefix)
+        let mainAfter = store.regionStatus(videoId: "v", region: .main)
+
+        // Prefix unchanged.
+        #expect(prefixAfter?.startOffset == prefixBefore?.startOffset)
+        #expect(prefixAfter?.endOffset == prefixBefore?.endOffset)
+        // Main reanchored at the requested byte, empty.
+        let expectedStart: Int64 = 120 * 1024 * 1024
+        #expect(mainAfter?.startOffset == expectedStart)
+        #expect(mainAfter?.endOffset == expectedStart)
+    }
+
+    @Test func resetMain_clampsBelowPrefixEnd() {
+        // newStartOffset that would precede prefix.endOffset is clamped UP to
+        // prefixEnd so the regions stay disjoint and main never overlaps prefix.
+        let store = CacheStore()
+        let totalSize: Int64 = 200 * 1024 * 1024
+        let prefixSize = CacheStore.computePrefixSize(totalSize: totalSize)  // 8 MB
+        let resumeByte = prefixSize + 1024
+        store.setEntry(videoId: "v", totalSize: totalSize, contentType: "video/mp4", resumeByte: resumeByte)
+        Self.writeChunksToRegion(store: store, videoId: "v", region: .prefix, bytes: Int(prefixSize), byte: 0xAA)
+
+        // Try to reset main before prefix ends (4 MB < 8 MB prefixEnd).
+        store.resetMainRegion(videoId: "v", newStartOffset: 4 * 1024 * 1024)
+        let mainAfter = store.regionStatus(videoId: "v", region: .main)
+        // Clamped UP to prefix.endOffset (= prefixSize since prefix is full).
+        #expect(mainAfter?.startOffset == prefixSize)
+    }
+
+    @Test func resetMain_clampsAtOrAboveTotalSize_removesMain() {
+        // newStartOffset >= totalSize would create a degenerate zero-length
+        // region; remove main entirely instead.
+        let store = CacheStore()
+        let totalSize: Int64 = 200 * 1024 * 1024
+        let prefixSize = CacheStore.computePrefixSize(totalSize: totalSize)
+        store.setEntry(videoId: "v", totalSize: totalSize, contentType: "video/mp4", resumeByte: prefixSize)
+        Self.writeChunksToRegion(store: store, videoId: "v", region: .main, bytes: 1024, byte: 0xBB)
+        #expect(store.regionStatus(videoId: "v", region: .main) != nil)
+
+        store.resetMainRegion(videoId: "v", newStartOffset: totalSize)
+        #expect(store.regionStatus(videoId: "v", region: .main) == nil)
+
+        // Re-seed and try past totalSize — also removes. `setEntry` is
+        // idempotent on matching (videoId, totalSize, contentType), so we
+        // `clear()` first to force a fresh entry that re-creates `.main`.
+        store.clear()
+        store.setEntry(videoId: "v", totalSize: totalSize, contentType: "video/mp4", resumeByte: prefixSize)
+        Self.writeChunksToRegion(store: store, videoId: "v", region: .main, bytes: 1024, byte: 0xBB)
+        store.resetMainRegion(videoId: "v", newStartOffset: totalSize + 1_000_000)
+        #expect(store.regionStatus(videoId: "v", region: .main) == nil)
+    }
+
+    @Test func resetMain_wrongVideoId_noop() {
+        let store = CacheStore()
+        let totalSize: Int64 = 200 * 1024 * 1024
+        let prefixSize = CacheStore.computePrefixSize(totalSize: totalSize)
+        store.setEntry(videoId: "v", totalSize: totalSize, contentType: "video/mp4", resumeByte: prefixSize)
+        Self.writeChunksToRegion(store: store, videoId: "v", region: .main, bytes: 4096, byte: 0xBB)
+        let mainBefore = store.regionStatus(videoId: "v", region: .main)
+
+        store.resetMainRegion(videoId: "other", newStartOffset: 100 * 1024 * 1024)
+        let mainAfter = store.regionStatus(videoId: "v", region: .main)
+        #expect(mainAfter?.startOffset == mainBefore?.startOffset)
+        #expect(mainAfter?.endOffset == mainBefore?.endOffset)
+    }
+
+    @Test func resetMain_missingEntry_noop() {
+        let store = CacheStore()
+        // No entry installed; resetMain must not crash or create an entry.
+        store.resetMainRegion(videoId: "v", newStartOffset: 100 * 1024 * 1024)
+        #expect(store.currentVideoId() == nil)
+        #expect(store.regionStatus(videoId: "v", region: .main) == nil)
+    }
+
+    @Test func resetMain_doesNotResetLastPlaybackOffset() {
+        // Verify `lastPlaybackOffset` survives a reseed. We assert this
+        // indirectly via trim behavior: with playback offset set high, the
+        // first fill triggers auto-trim. Reseed at a new byte and refill —
+        // trim must STILL fire (would not if lastPlaybackOffset were reset to
+        // 0, since `safeTrimBound = -30MB` would make every trim a no-op).
+        let store = CacheStore()
+        let totalSize: Int64 = 10 * 1024 * 1024 * 1024  // 10 GB so prefix is at 50 MB cap
+        let prefixSize = CacheStore.computePrefixSize(totalSize: totalSize)
+        #expect(prefixSize == CacheStore.maxPrefixSize)
+        let resumeByte = prefixSize
+        store.setEntry(videoId: "v", totalSize: totalSize, contentType: "video/mp4", resumeByte: resumeByte)
+
+        // Place playback far enough into the file that future trims have margin.
+        let duration: Double = 1000
+        let avgByterate = Double(totalSize) / duration
+        let plannedTotal = CacheStore.trimThreshold + 5 * CacheStore.chunkSize
+        let playbackByte = resumeByte + Int64(plannedTotal - 50_000_000)
+        let seconds = Double(playbackByte) / avgByterate
+        store.updatePlaybackPosition(videoId: "v", seconds: seconds, duration: duration)
+
+        // Fill past trimThreshold — auto-trim during writeChunk should fire.
+        let chunk = Data(repeating: 0xBB, count: CacheStore.chunkSize)
+        var mainStartBefore = store.regionStatus(videoId: "v", region: .main)?.startOffset ?? 0
+        var written = 0
+        while written < plannedTotal {
+            _ = store.writeChunk(videoId: "v", toRegion: .main, chunk: chunk)
+            written += chunk.count
+        }
+        let mainStartAfterFirstTrim = store.regionStatus(videoId: "v", region: .main)?.startOffset ?? 0
+        #expect(mainStartAfterFirstTrim > mainStartBefore, "first auto-trim must fire (sanity)")
+
+        // RESEED at a new byte. Playback offset must survive this call.
+        let reseedAt: Int64 = playbackByte + 100_000_000
+        store.resetMainRegion(videoId: "v", newStartOffset: reseedAt)
+        // Place playback further forward so the next batch can trim again.
+        let playback2 = reseedAt + Int64(plannedTotal - 50_000_000)
+        store.updatePlaybackPosition(videoId: "v", seconds: Double(playback2) / avgByterate, duration: duration)
+
+        mainStartBefore = store.regionStatus(videoId: "v", region: .main)?.startOffset ?? 0
+        written = 0
+        while written < plannedTotal {
+            _ = store.writeChunk(videoId: "v", toRegion: .main, chunk: chunk)
+            written += chunk.count
+        }
+        let mainStartAfterSecondTrim = store.regionStatus(videoId: "v", region: .main)?.startOffset ?? 0
+        // If `lastPlaybackOffset` had been zeroed by resetMainRegion, the
+        // second trim could not advance main (safeTrimBound goes negative).
+        // The advance proves the playback offset survived the reseed.
+        #expect(mainStartAfterSecondTrim > mainStartBefore, "auto-trim must STILL fire after reseed — proves lastPlaybackOffset survived")
+    }
+
+    /// When the clamped `newStartOffset` equals the existing `.main.startOffset`
+    /// AND main already has cached bytes, `resetMainRegion` preserves the
+    /// region instead of wiping it. This is the backward-scrub-into-prefix
+    /// optimisation: a scrub byte below `prefixEnd` clamps up to prefixEnd,
+    /// which is the same place main is anchored — wiping it would discard
+    /// useful bytes for no benefit. The store keeps the region intact and
+    /// the preloader's resume-from-tail logic picks up from `main.endOffset`.
+    @Test func resetMain_clampedEqualsPreviousStart_preservesMain() {
+        let store = CacheStore()
+        let totalSize: Int64 = 200 * 1024 * 1024
+        let prefixSize = CacheStore.computePrefixSize(totalSize: totalSize)
+        let resumeByte = prefixSize
+        store.setEntry(videoId: "v", totalSize: totalSize, contentType: "video/mp4", resumeByte: resumeByte)
+        // Fill prefix so prefix.endOffset == prefixSize (the clamp's lower
+        // bound is `prefix.endOffset`, not `prefixSize`).
+        Self.writeChunksToRegion(store: store, videoId: "v", region: .prefix, bytes: Int(prefixSize), byte: 0xAA)
+        // Populate main with a few MB of bytes at prefixEnd.
+        Self.writeChunksToRegion(store: store, videoId: "v", region: .main, bytes: 4 * 1024 * 1024, byte: 0xBB)
+        let mainBefore = store.regionStatus(videoId: "v", region: .main)
+        let bytesBefore = mainBefore.map { Int($0.endOffset - $0.startOffset) } ?? 0
+        #expect(bytesBefore > 0, "precondition: main must hold cached bytes")
+
+        // Reseed to a byte WAY below prefixEnd — gets clamped UP to prefixEnd.
+        // Since main is already at prefixEnd, clamped == previousStart and the
+        // short-circuit must keep main intact.
+        store.resetMainRegion(videoId: "v", newStartOffset: 4096)
+
+        let mainAfter = store.regionStatus(videoId: "v", region: .main)
+        #expect(mainAfter?.startOffset == prefixSize,
+                "main.startOffset must remain at prefixEnd after the short-circuit")
+        // The key invariant: cached bytes survive.
+        let bytesAfter = mainAfter.map { Int($0.endOffset - $0.startOffset) } ?? 0
+        #expect(bytesAfter == bytesBefore,
+                "main's cached bytes must survive the no-op clamp short-circuit")
+    }
+
+    /// The short-circuit only fires when `clamped == previousStart`. A
+    /// clamped target ABOVE the previous start (forward scrub past
+    /// `main.endOffset` for instance) must still wipe and re-anchor — the
+    /// short-circuit is scoped to the specific wasteful pattern, not a
+    /// blanket "skip when there are cached bytes" check.
+    @Test func resetMain_clampedAboveStart_stillWipes() {
+        let store = CacheStore()
+        let totalSize: Int64 = 200 * 1024 * 1024
+        let prefixSize = CacheStore.computePrefixSize(totalSize: totalSize)
+        let resumeByte = prefixSize
+        store.setEntry(videoId: "v", totalSize: totalSize, contentType: "video/mp4", resumeByte: resumeByte)
+        Self.writeChunksToRegion(store: store, videoId: "v", region: .main, bytes: 4 * 1024 * 1024, byte: 0xBB)
+        let bytesBefore = store.regionStatus(videoId: "v", region: .main)
+            .map { Int($0.endOffset - $0.startOffset) } ?? 0
+        #expect(bytesBefore > 0)
+
+        // Forward reseed past current main's bytes.
+        let newStart: Int64 = 100 * 1024 * 1024
+        store.resetMainRegion(videoId: "v", newStartOffset: newStart)
+
+        let mainAfter = store.regionStatus(videoId: "v", region: .main)
+        #expect(mainAfter?.startOffset == newStart)
+        #expect(mainAfter?.endOffset == newStart, "main must be empty after a forward wipe-and-reanchor")
+    }
+
+    @Test func resetMain_smallFileNoMain_noop() {
+        // totalSize ≤ prefixSize → no main exists. resetMain must not create one.
+        let store = CacheStore()
+        store.setEntry(videoId: "v", totalSize: 4096, contentType: "video/mp4", resumeByte: 0)
+        #expect(store.regionStatus(videoId: "v", region: .main) == nil)
+        store.resetMainRegion(videoId: "v", newStartOffset: 1024)
+        #expect(store.regionStatus(videoId: "v", region: .main) == nil)
+    }
+
+    /// Write `bytes` zero-filled chunks of value `byte` into an existing
+    /// entry's region. Unlike `setEntryAndFill`, the entry must already
+    /// exist — this helper only issues `writeChunk` calls. Used by the
+    /// resetMainRegion tests to populate regions selectively before/after
+    /// the reseed call.
+    private static func writeChunksToRegion(
+        store: CacheStore,
+        videoId: String,
+        region: CacheStore.RegionID,
+        bytes: Int,
+        byte: UInt8
+    ) {
+        var written = 0
+        while written < bytes {
+            let chunkBytes = min(CacheStore.chunkSize, bytes - written)
+            let chunk = Data(repeating: byte, count: chunkBytes)
+            _ = store.writeChunk(videoId: videoId, toRegion: region, chunk: chunk)
+            written += chunkBytes
+        }
     }
 }

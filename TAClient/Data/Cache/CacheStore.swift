@@ -229,9 +229,38 @@ nonisolated final class CacheStore: @unchecked Sendable {
     ///
     /// Both regions start empty (no chunks); writers append via
     /// `writeChunk(videoId:toRegion:_:)`.
+    ///
+    /// **Idempotency**: when called with a `videoId`, `totalSize`, AND
+    /// `contentType` that all match the existing entry, this method is a
+    /// no-op — the existing entry (regions, cached chunks, and
+    /// `lastPlaybackOffset`) is preserved. LOAD-BEARING for the
+    /// `.critical` → `restartPreloadIfNeeded` → `startPreloadWithRetry` →
+    /// `downloadVideo` chain: the restart hook calls `resetMainRegion`
+    /// first to anchor `.main` at the new playhead while preserving
+    /// `.prefix`, then `downloadVideo` calls `setEntry` with identical
+    /// `(videoId, totalSize, contentType)` from the HEAD probe. Without
+    /// idempotency, that `setEntry` call wipes the prefix bytes that the
+    /// soft-`.critical` policy was designed to preserve, opening a brief
+    /// moov-cache-miss window where a scrub-after-resume can re-trigger
+    /// the same freeze the two-region architecture exists to prevent.
+    /// A `resumeByte` change alone is NOT enough to bust the cache — the
+    /// existing main region's `startOffset` is already wherever
+    /// `resetMainRegion` or a prior `setEntry` placed it; the caller is
+    /// expected to use `resetMainRegion` for anchor changes, not a fresh
+    /// `setEntry` with a new `resumeByte`.
     func setEntry(videoId: String, totalSize: Int64, contentType: String, resumeByte: Int64) {
         lock.lock()
         defer { lock.unlock() }
+
+        if let existing = entry,
+           existing.videoId == videoId,
+           existing.totalSize == totalSize,
+           existing.contentType == contentType {
+            // Idempotent same-entry call. Preserve regions, chunks, and
+            // lastPlaybackOffset. See the doc comment above for the
+            // load-bearing reason this branch exists.
+            return
+        }
 
         let prefixSize = Self.computePrefixSize(totalSize: totalSize)
         // Clamp `resumeByte` into the file's byte range. Corrupt saved
@@ -364,6 +393,85 @@ nonisolated final class CacheStore: @unchecked Sendable {
         entry = nil
         lastPlaybackOffset = 0
         logger.info("Cache cleared")
+    }
+
+    /// Replace the `.main` region with a fresh empty one anchored at
+    /// `newStartOffset`. Keeps `.prefix` untouched (preserving moov-atom
+    /// protection across large scrubs). Does NOT reset `lastPlaybackOffset` —
+    /// trim math continues to operate from the same reference point.
+    ///
+    /// Clamping: `newStartOffset` is clamped into `[prefixEnd ?? 0, totalSize]`.
+    /// If the clamped value equals `totalSize`, the `.main` region is REMOVED
+    /// entirely (degenerate zero-length range at EOF).
+    ///
+    /// No-op for: missing entry, videoId mismatch, no `.main` region exists
+    /// (small-file case where `totalSize <= prefixSize`).
+    func resetMainRegion(videoId: String, newStartOffset: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var current = entry, current.videoId == videoId else { return }
+        // No-op when the entry has no `.main` region (small files where the
+        // whole file fits inside `.prefix`).
+        guard current.regions[.main] != nil else { return }
+
+        // Clamp lower: never start before prefix ends, never before 0.
+        let prefixEnd = current.regions[.prefix]?.endOffset ?? 0
+        let lowerBound = max(Int64(0), prefixEnd)
+        let totalSize = current.totalSize
+        let clamped = min(max(newStartOffset, lowerBound), totalSize)
+
+        let previousStart = current.regions[.main]?.startOffset ?? 0
+        let previousEnd = current.regions[.main]?.endOffset ?? 0
+
+        // Backward-into-prefix preserve: when the clamp raises
+        // `newStartOffset` (a scrub byte that fell below `prefixEnd`) back up
+        // to the existing `.main.startOffset`, wiping `.main` and re-seeding
+        // an empty region at the SAME anchor would discard cached bytes for
+        // no benefit. The caller's intent was "playback jumped backward
+        // into the prefix region — make sure `.main` is anchored there",
+        // and the existing main already satisfies that. Short-circuit and
+        // keep the accumulated bytes.
+        //
+        // This only fires when `clamped == previousStart`. A forward scrub
+        // past `previousEnd` produces a `clamped > previousStart` and falls
+        // through to the rebuild path; a backward scrub into a region of
+        // bytes the main has TRIMMED past (e.g. main = [500MB..580MB] and
+        // user scrubs to byte 5MB → clamped = prefixEnd = 8MB ≠ 500MB) also
+        // falls through. The short-circuit fires only for the specific
+        // wasteful pattern: backward scrub into prefix when main is still
+        // anchored at prefixEnd.
+        if clamped == previousStart, current.regions[.main] != nil {
+            // **Load-bearing for `VideoCachePreloader.reseedMain`'s
+            // resume-from-tail fast path**: when this short-circuit fires,
+            // both `startOffset` AND `endOffset` are preserved exactly. The
+            // preloader re-reads `regionStatus(.main)` after calling us and
+            // compares `(newMain.startOffset, newMain.endOffset)` against
+            // `(previousStart, previousEnd)` to decide whether to spawn a
+            // fresh download at `mainStart` or resume from the live tail
+            // (`newMain.endOffset`). If a future refactor changes this branch
+            // to (say) reset `endOffset` to `clamped` while preserving
+            // `startOffset`, the preloader would re-fetch every byte from
+            // `startOffset..<endOffset` even though they're already cached.
+            // Keep the no-op a true no-op.
+            logger.info("[Reseed] main keep @byte=\(clamped) (was [\(previousStart)..\(previousEnd))) for \(videoId) — already anchored")
+            return
+        }
+
+        if clamped >= totalSize {
+            // Degenerate: at EOF — remove `.main` entirely rather than create
+            // a zero-length region that would later trip the preloader's
+            // pause-gate / read-path assumptions.
+            current.regions[.main] = nil
+        } else {
+            current.regions[.main] = CacheRegion(
+                id: .main,
+                startOffset: clamped,
+                chunks: [],
+                cachedByteCount: 0
+            )
+        }
+        entry = current
+        logger.info("[Reseed] main reset @byte=\(clamped) (was [\(previousStart)..\(previousEnd))) for \(videoId)")
     }
 
     // MARK: - Internal (lock already held)

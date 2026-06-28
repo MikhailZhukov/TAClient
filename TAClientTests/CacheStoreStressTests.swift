@@ -348,4 +348,163 @@ import Foundation
             #expect(s.startOffset >= prefixSize)
         }
     }
+
+    // MARK: - resetMainRegion concurrency
+
+    /// Tracks the latest reseed argument across the reseeder task so the test
+    /// body can assert the final `.main` region's `startOffset` matches the
+    /// LAST `newStartOffset` passed to `resetMainRegion` once all tasks join.
+    private final class ReseedRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _lastTarget: Int64?
+        private var _callCount: Int = 0
+
+        func record(target: Int64) {
+            lock.lock(); defer { lock.unlock() }
+            _lastTarget = target
+            _callCount += 1
+        }
+
+        var snapshot: (lastTarget: Int64?, callCount: Int) {
+            lock.lock(); defer { lock.unlock() }
+            return (_lastTarget, _callCount)
+        }
+    }
+
+    /// Stress NSLock invariants on the `resetMainRegion` mutation path. 10
+    /// writers append `.main` chunks in tight loops while a single reseeder
+    /// calls `resetMainRegion` 5× at random intervals — all under
+    /// `Task.detached` so they truly run in parallel.
+    ///
+    /// Invariants validated:
+    /// (a) No crashes (test completes).
+    /// (b) After all tasks join, `regionStatus(.main).startOffset` equals the
+    ///     LAST `newStartOffset` the reseeder passed (clamping is a no-op here
+    ///     because all targets are well inside `[prefixEnd, totalSize)`).
+    ///     Writes cannot move `startOffset` — only `resetMainRegion` does
+    ///     (auto-trim is disabled in this test by keeping total written bytes
+    ///     well below `trimThreshold = 282 MB`). The reseeder is awaited LAST
+    ///     so its terminal call is guaranteed to have happened after every
+    ///     writer's last write.
+    /// (c) `regionStatus(.main).endOffset >= startOffset` (no torn state).
+    ///
+    /// This test locks in the contract that the NSLock guarding `entry`
+    /// serialises `writeChunk` and `resetMainRegion` correctly — a regression
+    /// removing the lock or splitting it would surface as either a crash, a
+    /// torn region, or a mismatched final `startOffset`.
+    @Test(.timeLimit(.minutes(1)))
+    nonisolated func resetMain_concurrentWithWrite_noCorruption() async {
+        let store = CacheStore()
+        let videoId = "stress-reseed"
+        // 4 GB total → plenty of room for reseed targets up to ~1 GB without
+        // hitting EOF clamp, and prefixSize stays at the 50 MB cap.
+        let totalSize: Int64 = 4_000_000_000
+        let prefixSize = CacheStore.computePrefixSize(totalSize: totalSize)
+        store.setEntry(videoId: videoId, totalSize: totalSize, contentType: "video/mp4", resumeByte: prefixSize)
+
+        // Pre-defined reseed targets — all comfortably inside
+        // `[prefixSize, totalSize)`, so clamping is a no-op and the final
+        // `startOffset` should equal the last value verbatim. Targets are
+        // monotonically increasing so a stale-write race that re-applies an
+        // older reseed would be immediately visible.
+        let reseedTargets: [Int64] = [
+            200_000_000,
+            400_000_000,
+            600_000_000,
+            800_000_000,
+            1_000_000_000
+        ]
+
+        let counters = Counters()
+        let recorder = ReseedRecorder()
+
+        // Chunk payload: small chunks, bounded count per writer so total
+        // bytes-written across all 10 writers stays well below `trimThreshold`
+        // (282 MB). With 10 writers × max ~500 chunks × 16 KB ≈ 80 MB worst
+        // case — auto-trim cannot fire and `startOffset` is only ever moved
+        // by `resetMainRegion`.
+        let chunkSize = 16 * 1024 // 16 KB
+        let maxChunksPerWriter = 500
+
+        // Writers: append `.main` chunks in tight loops with bounded iteration.
+        // Yield occasionally so the reseeder gets scheduled.
+        var writers: [Task<Void, Never>] = []
+        for _ in 0..<10 {
+            let t = Task.detached(priority: .userInitiated) {
+                let deadline = Date().addingTimeInterval(1.0)
+                var i = 0
+                while Date() < deadline && i < maxChunksPerWriter {
+                    var bytes = [UInt8](repeating: 0, count: chunkSize)
+                    for j in 0..<chunkSize {
+                        bytes[j] = UInt8((i &+ j) % 251)
+                    }
+                    let chunk = Data(bytes)
+                    if store.writeChunk(videoId: videoId, toRegion: .main, chunk: chunk) {
+                        counters.recordWrite(bytes: chunk.count)
+                    }
+                    i += 1
+                    if i % 8 == 0 { await Task.yield() }
+                }
+            }
+            writers.append(t)
+        }
+
+        // Reseeder: 5 reseeds at random sub-millisecond intervals, racing the
+        // writers. Each call mutates `startOffset` to the target verbatim
+        // (clamping is a no-op for these targets).
+        let reseeder = Task.detached(priority: .userInitiated) {
+            var rng = SystemRandomNumberGenerator()
+            for target in reseedTargets {
+                // Small randomised pause between reseeds so they interleave
+                // with writes instead of running back-to-back.
+                let nanos = UInt64.random(in: 1_000_000...20_000_000, using: &rng) // 1–20 ms
+                try? await Task.sleep(nanoseconds: nanos)
+                store.resetMainRegion(videoId: videoId, newStartOffset: target)
+                recorder.record(target: target)
+            }
+        }
+
+        // CRITICAL ordering: await all writers FIRST, then the reseeder LAST.
+        // This guarantees the reseeder's terminal `resetMainRegion` call lands
+        // after every writer has stopped appending, so the final `startOffset`
+        // assertion is deterministic. (Without this, a writer that yields
+        // after the reseeder's last call could race — though it still couldn't
+        // move `startOffset`, the assertion's intent is clearer this way.)
+        for w in writers { _ = await w.value }
+        _ = await reseeder.value
+
+        let snap = counters.snapshot()
+        let rsnap = recorder.snapshot
+
+        // Invariant (a): we got here without crashing.
+        #expect(snap.violation == nil, "\(snap.violation ?? "unknown violation")")
+
+        // Sanity: the reseeder fired all 5 calls; writers did meaningful work.
+        #expect(rsnap.callCount == reseedTargets.count)
+        #expect(rsnap.lastTarget == reseedTargets.last)
+        #expect(snap.writesSucceeded > 0)
+
+        // Invariant (b): final `.main` region's `startOffset` matches the
+        // LAST reseed argument. Writes never move `startOffset` in this test
+        // (total written stays well below `trimThreshold`); only
+        // `resetMainRegion` does. The reseeder's 5 calls take <=100ms total
+        // (5 × max 20ms sleep) while the writers' deadline is 1.0s, so the
+        // terminal reseed lands deep inside the writers' budget — but a
+        // post-reseed write only mutates `endOffset` (and `cachedByteCount`),
+        // not `startOffset`. Plan spec explicitly notes this race: writes
+        // may grow the region after the last reseed, but the start-anchor
+        // must still equal the last reseed argument.
+        let finalMain = store.regionStatus(videoId: videoId, region: .main)
+        #expect(finalMain != nil)
+        #expect(finalMain?.startOffset == reseedTargets.last)
+
+        // Invariant (c): no torn region — `endOffset >= startOffset`. Writes
+        // that race the terminal reseed legitimately push `endOffset` past
+        // `startOffset` (they target the freshly-anchored region). What we
+        // forbid is the reverse — `endOffset < startOffset` would indicate a
+        // torn write that bypassed the lock.
+        if let m = finalMain {
+            #expect(m.endOffset >= m.startOffset)
+        }
+    }
 }
