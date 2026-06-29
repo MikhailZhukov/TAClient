@@ -131,10 +131,7 @@ struct VideoDetailView: View {
                     player: player,
                     isFullScreen: $viewModel.isFullScreen,
                     isPiPActive: $viewModel.isPiPActive,
-                    onPiPStopped: { viewModel.handlePiPStopped() },
-                    onDoubleTap: viewModel.doubleTapToSeek ? { forward in
-                        viewModel.seekByInterval(forward: forward)
-                    } : nil
+                    onPiPStopped: { viewModel.handlePiPStopped() }
                 )
                 if viewModel.isBuffering {
                     Color.black
@@ -142,10 +139,6 @@ struct VideoDetailView: View {
                         .controlSize(.large)
                         .tint(.white)
                 }
-                PlayerSeekFeedbackOverlay(
-                    seekInterval: viewModel.seekInterval,
-                    feedback: viewModel.seekFeedback
-                )
                 sponsorBlockBanner
             }
             .aspectRatio(16.0 / 9.0, contentMode: .fill)
@@ -335,10 +328,9 @@ struct AVPlayerView: UIViewControllerRepresentable {
     @Binding var isFullScreen: Bool
     @Binding var isPiPActive: Bool
     var onPiPStopped: (() -> Void)?
-    var onDoubleTap: ((_ forward: Bool) -> Void)?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(isFullScreen: $isFullScreen, isPiPActive: $isPiPActive, onPiPStopped: onPiPStopped, onDoubleTap: onDoubleTap)
+        Coordinator(isFullScreen: $isFullScreen, isPiPActive: $isPiPActive, onPiPStopped: onPiPStopped)
     }
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
@@ -351,15 +343,6 @@ struct AVPlayerView: UIViewControllerRepresentable {
         if let item = player.currentItem {
             context.coordinator.observeEnd(of: item, playerVC: controller)
         }
-        let tap = UITapGestureRecognizer(
-            target: context.coordinator,
-            action: #selector(Coordinator.handleDoubleTap(_:))
-        )
-        tap.numberOfTapsRequired = 2
-        tap.cancelsTouchesInView = false
-        tap.delegate = context.coordinator
-        controller.view.addGestureRecognizer(tap)
-        context.coordinator.doubleTapRecognizer = tap
         return controller
     }
 
@@ -367,8 +350,6 @@ struct AVPlayerView: UIViewControllerRepresentable {
         context.coordinator.isFullScreen = $isFullScreen
         context.coordinator.isPiPActive = $isPiPActive
         context.coordinator.onPiPStopped = onPiPStopped
-        context.coordinator.onDoubleTap = onDoubleTap
-        context.coordinator.doubleTapRecognizer?.isEnabled = onDoubleTap != nil
         if controller.player !== player {
             controller.player = player
             Self.applyPlayerConfig(player)
@@ -389,12 +370,10 @@ struct AVPlayerView: UIViewControllerRepresentable {
         player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
     }
 
-    class Coordinator: NSObject, AVPlayerViewControllerDelegate, UIGestureRecognizerDelegate {
+    class Coordinator: NSObject, AVPlayerViewControllerDelegate {
         var isFullScreen: Binding<Bool>
         var isPiPActive: Binding<Bool>
         var onPiPStopped: (() -> Void)?
-        var onDoubleTap: ((_ forward: Bool) -> Void)?
-        weak var doubleTapRecognizer: UITapGestureRecognizer?
         private var endObserver: Any?
         private var timeJumpObserver: Any?
         /// KVO on `AVPlayer.currentItem` so we self-rewire `endObserver` /
@@ -427,11 +406,10 @@ struct AVPlayerView: UIViewControllerRepresentable {
         private static let reclampDelay: TimeInterval = 0.15
         private static let reclampDriftTolerance: Double = 0.5
 
-        init(isFullScreen: Binding<Bool>, isPiPActive: Binding<Bool>, onPiPStopped: (() -> Void)?, onDoubleTap: ((_ forward: Bool) -> Void)?) {
+        init(isFullScreen: Binding<Bool>, isPiPActive: Binding<Bool>, onPiPStopped: (() -> Void)?) {
             self.isFullScreen = isFullScreen
             self.isPiPActive = isPiPActive
             self.onPiPStopped = onPiPStopped
-            self.onDoubleTap = onDoubleTap
         }
 
         /// Decides whether to resume playback after fullscreen exit.
@@ -510,20 +488,6 @@ struct AVPlayerView: UIViewControllerRepresentable {
         static func shouldClearEndFlag(currentTime: Double, duration: Double) -> Bool {
             guard duration.isFinite, duration > 0, currentTime.isFinite else { return false }
             return currentTime < Self.endFlagClearThreshold
-        }
-
-        @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
-            guard let view = recognizer.view else { return }
-            let location = recognizer.location(in: view)
-            let forward = location.x >= view.bounds.width / 2
-            onDoubleTap?(forward)
-        }
-
-        func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer,
-            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
-        ) -> Bool {
-            true
         }
 
         // INVARIANT: The Coordinator self-rewires its end / timeJumped observers

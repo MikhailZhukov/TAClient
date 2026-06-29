@@ -331,8 +331,7 @@ struct CoordinatorEndFlagWiringTests {
         return AVPlayerView.Coordinator(
             isFullScreen: Binding(get: { fs }, set: { fs = $0 }),
             isPiPActive: Binding(get: { pip }, set: { pip = $0 }),
-            onPiPStopped: nil,
-            onDoubleTap: nil
+            onPiPStopped: nil
         )
     }
 
