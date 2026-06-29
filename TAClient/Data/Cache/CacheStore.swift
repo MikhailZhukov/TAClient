@@ -215,6 +215,20 @@ nonisolated final class CacheStore: @unchecked Sendable {
         return entry?.videoId
     }
 
+    /// Test-only seam (PERMANENT): direct read of `lastPlaybackOffset` for
+    /// assertions that need to confirm playback-offset survival/reset across
+    /// `setEntry` / `resetMainRegion` / `clear`. Exposed because the offset is
+    /// otherwise only observable through `trimFront`, whose result is also
+    /// gated on `.main` exceeding `maxCacheSize` (256 MB) — making indirect
+    /// observation impossible for the small-cache fixtures these tests use.
+    /// Accessed via `@testable import TAClient`; not part of the production
+    /// call path.
+    func testInspectLastPlaybackOffset() -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastPlaybackOffset
+    }
+
     // MARK: - Writes
 
     /// Install a fresh entry, replacing any existing one. Resets the playback

@@ -1043,10 +1043,10 @@ import Foundation
         _ = store.writeChunk(videoId: "v", toRegion: .prefix, chunk: Data(repeating: 0xAA, count: 8 * 1024 * 1024))
         _ = store.writeChunk(videoId: "v", toRegion: .main, chunk: Data(repeating: 0xBB, count: 50 * 1024 * 1024))
         // Set lastPlaybackOffset to a known value so we can confirm it survived.
-        // The observable effect is via trimFront — with a high playback offset
-        // and 50 MB of main bytes, trimFront would shed > 0 bytes if not reset.
         let duration: Double = 100
         store.updatePlaybackPosition(videoId: "v", seconds: 50, duration: duration)
+        let playbackOffsetBefore = store.testInspectLastPlaybackOffset()
+        #expect(playbackOffsetBefore > 0, "precondition: playback offset must be set")
 
         let prefixBefore = store.regionStatus(videoId: "v", region: .prefix)!
         let mainBefore = store.regionStatus(videoId: "v", region: .main)!
@@ -1075,11 +1075,14 @@ import Foundation
         #expect(mainAfter.endOffset == mainBefore.endOffset, "main.endOffset must be preserved by idempotent setEntry")
         #expect(cachedAfter == cachedBefore, "cachedByteCount must be unchanged by idempotent setEntry")
 
-        // lastPlaybackOffset survival — observable via trimFront. If
-        // lastPlaybackOffset had been reset to 0, trimFront would have no
-        // safe trim margin and return 0. We expect > 0 (trim fires).
-        let trimmed = store.trimFront(videoId: "v")
-        #expect(trimmed > 0, "lastPlaybackOffset must survive idempotent setEntry — trimFront must still find safe margin")
+        // lastPlaybackOffset survival — read directly via the test seam.
+        // (Cannot observe via trimFront here: trimFrontLocked only sheds bytes
+        // once `.main` exceeds maxCacheSize (256 MB); this fixture writes 50 MB,
+        // so trimFront is correctly a no-op regardless of lastPlaybackOffset.)
+        #expect(
+            store.testInspectLastPlaybackOffset() == playbackOffsetBefore,
+            "lastPlaybackOffset must survive idempotent setEntry"
+        )
     }
 
     /// A `contentType` mismatch (different MIME, e.g. server switched the
