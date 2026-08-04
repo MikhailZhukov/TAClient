@@ -118,6 +118,227 @@ struct DownloadQueueViewModelTests {
         #expect(vm.isAdding == false)
     }
 
+    // MARK: - reloadPreservingDepth (Bug A — depth-preserving mutation reload)
+
+    @Test func addToQueue_atDepth2_preservesLoadedPages_noCollapseToPageOne() async {
+        let repo = MockDownloadRepository()
+        repo.addToQueueHandler = { _ in }
+        repo.getDownloadsHandler = { page, _ in
+            TestData.downloadListResult(
+                count: 3, startIndex: (page - 1) * 3, currentPage: page, lastPage: 3
+            )
+        }
+        let (vm, _) = makeSUT(downloadRepo: repo)
+
+        // Load to currentPage == 2.
+        await vm.loadDownloads()
+        await vm.loadMoreIfNeeded()
+        #expect(vm.items.count == 6)
+
+        // Track which pages the post-add reload fetches.
+        var fetchedPages: [Int] = []
+        repo.getDownloadsHandler = { page, _ in
+            fetchedPages.append(page)
+            return TestData.downloadListResult(
+                count: 3, startIndex: (page - 1) * 3, currentPage: page, lastPage: 3
+            )
+        }
+
+        vm.addInput = "https://youtube.com/watch?v=abc123"
+        await vm.addToQueue()
+
+        #expect(vm.addInput == "")
+        // Both loaded pages refetched — proves currentPage stayed 2, NOT reset to 1.
+        // (We assert reconciliation of the existing depth, not that a newly-added item
+        // appears — a new item typically lands on a page beyond the loaded depth and is
+        // intentionally not surfaced until the user scrolls; same as the old page-1 reload.)
+        #expect(Set(fetchedPages) == Set([1, 2]))
+        #expect(vm.items.count == 6)
+    }
+
+    @Test func stopCurrentDownload_atDepth2_preservesLoadedPages() async {
+        let repo = MockDownloadRepository()
+        repo.killTaskHandler = { _ in }
+        repo.getDownloadsHandler = { page, _ in
+            TestData.downloadListResult(
+                count: 3, startIndex: (page - 1) * 3, currentPage: page, lastPage: 3
+            )
+        }
+        let (vm, _) = makeSUT(downloadRepo: repo)
+
+        await vm.loadDownloads()
+        await vm.loadMoreIfNeeded()
+        #expect(vm.items.count == 6)
+
+        // A stoppable active task so stopCurrentDownload proceeds.
+        vm.downloadProgress = [
+            TaskNotification(id: "t1", title: "Downloading", group: "download_pending",
+                             messages: ["m"], progress: 0.5, isError: false, canStop: true)
+        ]
+
+        var fetchedPages: [Int] = []
+        repo.getDownloadsHandler = { page, _ in
+            fetchedPages.append(page)
+            return TestData.downloadListResult(
+                count: 3, startIndex: (page - 1) * 3, currentPage: page, lastPage: 3
+            )
+        }
+
+        await vm.stopCurrentDownload()
+
+        #expect(vm.downloadProgress.isEmpty)
+        #expect(Set(fetchedPages) == Set([1, 2])) // depth preserved, not collapsed to 1
+        #expect(vm.items.count == 6)
+    }
+
+    @Test func deleteItem_error_onIgnoreTab_reloadsWithIgnoreFilter_revertsItem() async {
+        let repo = MockDownloadRepository()
+        repo.deleteDownloadHandler = { _ in
+            throw AppError.serverError(statusCode: 500, message: "fail")
+        }
+        repo.getDownloadsHandler = { _, filter in
+            // Distinct ids per tab so a pending clobber would be detectable.
+            if filter == "ignore" {
+                return DownloadListResult(
+                    items: [
+                        TestData.downloadItem(youtubeId: "ign-0", title: "Ignored 0", status: "ignore"),
+                        TestData.downloadItem(youtubeId: "ign-1", title: "Ignored 1", status: "ignore")
+                    ],
+                    currentPage: 1, lastPage: 1
+                )
+            }
+            return TestData.downloadListResult(count: 5) // pending data that must NOT leak in
+        }
+        let (vm, _) = makeSUT(downloadRepo: repo)
+
+        vm.filter = "ignore"
+        await vm.onFilterChanged()
+        #expect(vm.items.count == 2)
+
+        // Capture the filter the error-recovery reload uses.
+        var reloadFilter: String?
+        repo.getDownloadsHandler = { _, filter in
+            reloadFilter = filter
+            return DownloadListResult(
+                items: [
+                    TestData.downloadItem(youtubeId: "ign-0", title: "Ignored 0", status: "ignore"),
+                    TestData.downloadItem(youtubeId: "ign-1", title: "Ignored 1", status: "ignore")
+                ],
+                currentPage: 1, lastPage: 1
+            )
+        }
+
+        await vm.deleteItem(videoId: "ign-0")
+
+        // Filter-aware: reload used the ignore tab, not hardcoded "pending".
+        #expect(reloadFilter == "ignore")
+        // Optimistic removal reverted, no pending data leaked.
+        #expect(vm.items.count == 2)
+        #expect(vm.items.allSatisfy { $0.youtubeId.hasPrefix("ign-") })
+        #expect(vm.items.contains { $0.youtubeId == "ign-0" })
+    }
+
+    @Test func updateStatus_error_atDepth2_preservesLoadedPages_revertsItem() async {
+        let repo = MockDownloadRepository()
+        repo.updateStatusHandler = { _, _ in
+            throw AppError.serverError(statusCode: 500, message: "fail")
+        }
+        repo.getDownloadsHandler = { page, _ in
+            TestData.downloadListResult(
+                count: 3, startIndex: (page - 1) * 3, currentPage: page, lastPage: 3
+            )
+        }
+        let (vm, _) = makeSUT(downloadRepo: repo)
+
+        await vm.loadDownloads()
+        await vm.loadMoreIfNeeded()
+        #expect(vm.items.count == 6)
+        let idToRemove = vm.items[0].youtubeId
+
+        var fetchedPages: [Int] = []
+        repo.getDownloadsHandler = { page, _ in
+            fetchedPages.append(page)
+            return TestData.downloadListResult(
+                count: 3, startIndex: (page - 1) * 3, currentPage: page, lastPage: 3
+            )
+        }
+
+        await vm.updateStatus(videoId: idToRemove, status: "ignore")
+
+        #expect(Set(fetchedPages) == Set([1, 2])) // depth preserved on error recovery
+        #expect(vm.items.count == 6)
+        #expect(vm.items.contains { $0.youtubeId == idToRemove }) // optimistic removal reverted
+    }
+
+    @Test func downloadItem_onIgnoreTab_removesMovedRow_surgically_withoutRefetch() async {
+        let repo = MockDownloadRepository()
+        var priorityCalledFor: String?
+        repo.updateStatusHandler = { id, status in
+            if status == "priority" { priorityCalledFor = id }
+        }
+        // Count getDownloads calls so we can prove the row leaves via an in-place removal,
+        // NOT a full-array refetch (which would reset scroll + collide with the swipe).
+        var getDownloadsCalls = 0
+        repo.getDownloadsHandler = { _, _ in
+            getDownloadsCalls += 1
+            return DownloadListResult(
+                items: ["ign-0", "ign-1"].map {
+                    TestData.downloadItem(youtubeId: $0, title: $0, status: "ignore")
+                },
+                currentPage: 1, lastPage: 1
+            )
+        }
+        let (vm, _) = makeSUT(downloadRepo: repo)
+
+        vm.filter = "ignore"
+        await vm.onFilterChanged() // 1 getDownloads call to load the ignore list
+        #expect(vm.items.count == 2)
+        let callsAfterLoad = getDownloadsCalls
+
+        await vm.downloadItem(videoId: "ign-0")
+
+        // The prioritised row is dropped immediately via a surgical in-place removal — no
+        // manual refresh needed (polling reconcile is a no-op on the ignore tab).
+        #expect(priorityCalledFor == "ign-0")
+        #expect(vm.items.count == 1)
+        #expect(vm.items.contains { $0.youtubeId == "ign-1" })
+        #expect(vm.items.contains { $0.youtubeId == "ign-0" } == false)
+        // No full-array reload happened — the removal was surgical (scroll/swipe-safe).
+        #expect(getDownloadsCalls == callsAfterLoad)
+
+        vm.stopPolling()
+    }
+
+    @Test func downloadItem_onPendingTab_keepsItemInPlace_noRemoval() async {
+        let repo = MockDownloadRepository()
+        var priorityCalled = false
+        repo.updateStatusHandler = { _, status in
+            if status == "priority" { priorityCalled = true }
+        }
+        repo.getDownloadsHandler = { _, _ in
+            DownloadListResult(
+                items: ["dl-0", "dl-1"].map {
+                    TestData.downloadItem(youtubeId: $0, title: $0, status: "pending")
+                },
+                currentPage: 1, lastPage: 1
+            )
+        }
+        let (vm, _) = makeSUT(downloadRepo: repo)
+
+        await vm.loadDownloads() // filter defaults to "pending"
+        #expect(vm.items.count == 2)
+
+        await vm.downloadItem(videoId: "dl-0")
+
+        // On the pending tab the prioritised item STAYS in the list (it is still pending) —
+        // no optimistic removal, so nothing to jump. Reorder surfaces on the next poll tick.
+        #expect(priorityCalled)
+        #expect(vm.items.count == 2)
+        #expect(vm.items.contains { $0.youtubeId == "dl-0" })
+
+        vm.stopPolling()
+    }
+
     // MARK: - performPollTick (Task 1)
 
     @Test func performPollTick_finishTick_preservesLoadedPages_noCollapseToPageOne() async {
@@ -139,7 +360,7 @@ struct DownloadQueueViewModelTests {
         await vm.loadMoreIfNeeded()
         #expect(vm.items.count == 9)
 
-        // Track which pages get fetched during the finish tick.
+        // Track which pages get fetched during the idle ticks.
         var fetchedPages: [Int] = []
         repo.getDownloadsHandler = { page, _ in
             fetchedPages.append(page)
@@ -150,14 +371,23 @@ struct DownloadQueueViewModelTests {
                 lastPage: 3
             )
         }
-        // Finish: no active download.
+        // Idle ticks: no active download, but the pending queue is NOT drained (9 items),
+        // so the loop must survive the grace window, refetching all loaded pages each tick.
         repo.getNotificationsHandler = { [] }
 
-        let keepPolling = await vm.performPollTick()
-
-        #expect(keepPolling == false)
-        // All 3 loaded pages refetched (proves currentPage stayed 3, not collapsed to 1).
-        #expect(Set(fetchedPages) == Set([1, 2, 3]))
+        let bound = DownloadQueueViewModel.maxIdlePollsBeforeStop
+        // First `bound - 1` idle ticks keep polling (grace), preserving the loaded depth.
+        for _ in 0..<(bound - 1) {
+            fetchedPages.removeAll()
+            let keep = await vm.performPollTick()
+            #expect(keep == true)
+            // All 3 loaded pages refetched (proves currentPage stayed 3, not collapsed to 1).
+            #expect(Set(fetchedPages) == Set([1, 2, 3]))
+            #expect(vm.items.count == 9)
+        }
+        // The `bound`-th consecutive idle tick exhausts the grace window and stops.
+        let keepFinal = await vm.performPollTick()
+        #expect(keepFinal == false)
         #expect(vm.items.count == 9)
     }
 
@@ -212,11 +442,20 @@ struct DownloadQueueViewModelTests {
         #expect(vm.items.count == 2)
         #expect(vm.items.allSatisfy { $0.youtubeId.hasPrefix("ign-") })
 
-        // Finish tick while on the ignore tab.
+        // Idle ticks while on the ignore tab. `reconcileLoadedPages` is a no-op (pending
+        // guard) and the fast-stop is skipped (filter != "pending"), so the grace window
+        // governs the stop. Items must stay the 2 ignore items the whole time.
         repo.getNotificationsHandler = { [] }
-        let keepPolling = await vm.performPollTick()
 
-        #expect(keepPolling == false)
+        let bound = DownloadQueueViewModel.maxIdlePollsBeforeStop
+        for _ in 0..<(bound - 1) {
+            let keep = await vm.performPollTick()
+            #expect(keep == true)
+            #expect(vm.items.count == 2)
+            #expect(vm.items.allSatisfy { $0.youtubeId.hasPrefix("ign-") })
+        }
+        let keepFinal = await vm.performPollTick()
+        #expect(keepFinal == false)
         // items untouched — still the 2 ignore items, no pending data leaked in.
         #expect(vm.items.count == 2)
         #expect(vm.items.allSatisfy { $0.youtubeId.hasPrefix("ign-") })
@@ -268,6 +507,122 @@ struct DownloadQueueViewModelTests {
         #expect(vm.items == snapshot)
     }
 
+    // MARK: - performPollTick grace + fast-stop (Bug B)
+
+    @Test func performPollTick_singleIdleTick_withPendingItems_keepsPollingViaGrace() async {
+        let repo = MockDownloadRepository()
+        repo.getDownloadsHandler = { _, _ in
+            TestData.downloadListResult(count: 3, currentPage: 1, lastPage: 1)
+        }
+        let (vm, _) = makeSUT(downloadRepo: repo)
+        await vm.loadDownloads()
+        #expect(vm.items.count == 3)
+
+        // Idle tick (no active download) but pending queue is NOT drained.
+        repo.getNotificationsHandler = { [] }
+        let keep = await vm.performPollTick()
+
+        // A single idle tick must NOT stop — it's likely a between-videos gap.
+        #expect(keep == true)
+        #expect(vm.items.count == 3)
+    }
+
+    @Test func performPollTick_graceExhausted_stopsAfterMaxIdlePolls() async {
+        let repo = MockDownloadRepository()
+        repo.getDownloadsHandler = { _, _ in
+            TestData.downloadListResult(count: 3, currentPage: 1, lastPage: 1)
+        }
+        let (vm, _) = makeSUT(downloadRepo: repo)
+        await vm.loadDownloads()
+
+        repo.getNotificationsHandler = { [] }
+        let bound = DownloadQueueViewModel.maxIdlePollsBeforeStop
+
+        // First `bound - 1` idle ticks keep polling (queue non-empty, within grace).
+        for _ in 0..<(bound - 1) {
+            #expect(await vm.performPollTick() == true)
+        }
+        // The `bound`-th consecutive idle tick exhausts the grace window.
+        #expect(await vm.performPollTick() == false)
+    }
+
+    @Test func performPollTick_idleThenActive_resetsGraceCounter() async {
+        let repo = MockDownloadRepository()
+        repo.getDownloadsHandler = { _, _ in
+            TestData.downloadListResult(count: 3, currentPage: 1, lastPage: 1)
+        }
+        let (vm, _) = makeSUT(downloadRepo: repo)
+        await vm.loadDownloads()
+
+        let bound = DownloadQueueViewModel.maxIdlePollsBeforeStop
+        let active = [
+            TaskNotification(id: "t1", title: "Downloading", group: "download_pending",
+                             messages: ["m"], progress: 0.5, isError: false, canStop: true)
+        ]
+
+        // Walk the idle counter to `bound - 1` (one short of stopping).
+        repo.getNotificationsHandler = { [] }
+        for _ in 0..<(bound - 1) {
+            #expect(await vm.performPollTick() == true)
+        }
+
+        // An active tick must reset the counter.
+        repo.getNotificationsHandler = { active }
+        #expect(await vm.performPollTick() == true)
+
+        // Now `bound - 1` more idle ticks should ALL keep polling — proving the counter
+        // restarted from zero rather than carrying over and stopping early.
+        repo.getNotificationsHandler = { [] }
+        for _ in 0..<(bound - 1) {
+            #expect(await vm.performPollTick() == true)
+        }
+    }
+
+    @Test func performPollTick_idleTick_drainedQueue_fastStops() async {
+        let repo = MockDownloadRepository()
+        repo.getDownloadsHandler = { _, _ in
+            TestData.downloadListResult(count: 3, currentPage: 1, lastPage: 1)
+        }
+        let (vm, _) = makeSUT(downloadRepo: repo)
+        await vm.loadDownloads()
+        #expect(vm.items.count == 3)
+
+        // Idle tick AND the server now reports an empty pending queue (fully drained).
+        repo.getNotificationsHandler = { [] }
+        repo.getDownloadsHandler = { _, _ in
+            TestData.downloadListResult(count: 0, currentPage: 1, lastPage: 1)
+        }
+
+        // Fast-stop fires on the FIRST idle tick — no need to burn the grace window.
+        let keep = await vm.performPollTick()
+        #expect(keep == false)
+        #expect(vm.items.isEmpty)
+    }
+
+    @Test func performPollTick_withinGrace_emptyNotifications_keepsBanner() async {
+        let repo = MockDownloadRepository()
+        repo.getDownloadsHandler = { _, _ in
+            TestData.downloadListResult(count: 3, currentPage: 1, lastPage: 1)
+        }
+        let (vm, _) = makeSUT(downloadRepo: repo)
+        await vm.loadDownloads()
+
+        // Simulate a banner left over from the previous (active) tick.
+        vm.downloadProgress = [
+            TaskNotification(id: "t1", title: "Downloading", group: "download_pending",
+                             messages: ["m"], progress: 0.7, isError: false, canStop: true)
+        ]
+
+        // Idle tick with empty notifications, queue not drained -> within grace.
+        repo.getNotificationsHandler = { [] }
+        let keep = await vm.performPollTick()
+
+        #expect(keep == true)
+        // Banner preserved (not blanked to empty) so it doesn't flicker between videos.
+        #expect(vm.downloadProgress.count == 1)
+        #expect(vm.downloadProgress.first?.id == "t1")
+    }
+
     // MARK: - currentPage clamp-down on lastPage shrink (F2)
 
     @Test func performPollTick_lastPageShrinks_clampsCurrentPage_nextTickFetchesFewerPages() async {
@@ -308,6 +663,57 @@ struct DownloadQueueViewModelTests {
         let keep2 = await vm.performPollTick()
         #expect(keep2 == true)
         #expect(Set(fetchedPages) == Set([1, 2]))
+    }
+
+    @Test func performPollTick_lastPageZeroOnFinalPage_doesNotCollapseDepth() async {
+        // Regression: TA reports `last_page: 0` on the FINAL loaded page. The repo neutralises
+        // this, but the VM must ALSO be robust — a non-positive `newLastPage` reaching reconcile
+        // (via the final page's result) must NOT clamp `currentPage` to 0, which would make the
+        // next `fetchAllLoadedPages(upTo: 0)` refetch only page 1 and collapse a deep list to the
+        // top (the exact production log: items 178 -> 12).
+        let repo = MockDownloadRepository()
+        repo.getDownloadsHandler = { page, _ in
+            // Final loaded page (3) reports the bogus last_page 0; earlier pages report 3.
+            let last = page >= 3 ? 0 : 3
+            return TestData.downloadListResult(
+                count: 3, startIndex: (page - 1) * 3, currentPage: page, lastPage: last
+            )
+        }
+        let (vm, _) = makeSUT(downloadRepo: repo)
+
+        await vm.loadDownloads()
+        await vm.loadMoreIfNeeded()
+        await vm.loadMoreIfNeeded() // currentPage == 3, final page reports lastPage 0
+        #expect(vm.items.count == 9)
+
+        repo.getNotificationsHandler = {
+            [TaskNotification(id: "t1", title: "Downloading", group: "download_pending",
+                              messages: ["m"], progress: 0.5, isError: false, canStop: true)]
+        }
+        var fetchedPages: [Int] = []
+        repo.getDownloadsHandler = { page, _ in
+            fetchedPages.append(page)
+            let last = page >= 3 ? 0 : 3
+            return TestData.downloadListResult(
+                count: 3, startIndex: (page - 1) * 3, currentPage: page, lastPage: last
+            )
+        }
+
+        // First tick: reconcile at full depth; the bogus last_page 0 must NOT collapse depth.
+        let keep1 = await vm.performPollTick()
+        #expect(keep1 == true)
+        #expect(vm.items.count == 9)
+        #expect(Set(fetchedPages) == Set([1, 2, 3]))
+
+        // Second tick previously surfaced the collapse (fetchAllLoadedPages(upTo: 0) -> page 1
+        // only, items 9 -> 3). Depth must stay preserved.
+        fetchedPages.removeAll()
+        let keep2 = await vm.performPollTick()
+        #expect(keep2 == true)
+        #expect(vm.items.count == 9)
+        #expect(Set(fetchedPages) == Set([1, 2, 3]))
+
+        vm.stopPolling()
     }
 
     // MARK: - active-branch ignore-tab guard (F3)

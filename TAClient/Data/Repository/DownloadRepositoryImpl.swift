@@ -19,10 +19,19 @@ final class DownloadRepositoryImpl: DownloadRepositoryProtocol {
         )
 
         let items = response.data?.compactMap { DownloadMapper.map($0, serverURL: serverURL) } ?? []
+        let resolvedPage = response.paginate?.currentPage ?? page
+        // TA returns `last_page: 0` when the requested page IS the final page (pages before
+        // the last correctly report the real total). Trusting that 0 verbatim collapses the
+        // download queue: the polling reconcile clamps `currentPage = min(currentPage, 0) = 0`,
+        // and the next `fetchAllLoadedPages(upTo: 0)` then refetches only page 1 — throwing a
+        // deep-scrolled list back to the top. Treat a non-positive `last_page` as "this page
+        // is the last one" so `lastPage` is never below the page we actually loaded.
+        let reportedLast = response.paginate?.lastPage ?? resolvedPage
+        let resolvedLast = reportedLast > 0 ? reportedLast : resolvedPage
         return DownloadListResult(
             items: items,
-            currentPage: response.paginate?.currentPage ?? page,
-            lastPage: response.paginate?.lastPage ?? page
+            currentPage: resolvedPage,
+            lastPage: resolvedLast
         )
     }
 

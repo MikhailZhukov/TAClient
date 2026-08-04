@@ -50,6 +50,35 @@ extension DataLayerSuite {
         authState.handleUnauthorized()
     }
 
+    @Test func getDownloads_lastPageZeroOnFinalPage_resolvesToRequestedPage() async throws {
+        // TA reports `last_page: 0` when the requested page IS the final page. Trusting that 0
+        // verbatim collapses the download queue to the top; the repo must resolve it to the
+        // page actually loaded so pagination depth is never reported as below the loaded page.
+        let (repo, authState) = makeRepo()
+        MockResponse.setUp(json: [
+            "data": [
+                [
+                    "youtube_id": "dl15",
+                    "title": "Last Page Video",
+                    "status": "pending",
+                    "vid_thumb_url": "/cache/dl-thumb.jpg",
+                    "vid_type": "videos",
+                    "timestamp": 1704067200
+                ]
+            ],
+            "paginate": [
+                "current_page": 15,
+                "last_page": 0
+            ]
+        ] as [String: Any])
+
+        let result = try await repo.getDownloads(page: 15, filter: "pending")
+        #expect(result.currentPage == 15)
+        #expect(result.lastPage == 15) // NOT 0 — the collapse-to-top trigger is neutralised
+        #expect(result.items.count == 1)
+        authState.handleUnauthorized()
+    }
+
     // MARK: - updateStatus
 
     @Test func updateStatus_sendsPost() async throws {

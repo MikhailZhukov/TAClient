@@ -6,36 +6,6 @@ struct DownloadQueueView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !viewModel.downloadProgress.isEmpty {
-                VStack(spacing: 6) {
-                    ForEach(viewModel.downloadProgress, id: \.id) { info in
-                        TaskNotificationBanner(info: info)
-                    }
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-            }
-
-            if let error = viewModel.errorMessage, !viewModel.items.isEmpty {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text(error)
-                        .font(.subheadline)
-                    Spacer()
-                    Button {
-                        viewModel.errorMessage = nil
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .accessibilityLabel(String(localized: "dismiss"))
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                .background(.fill.tertiary)
-            }
-
             if viewModel.isLoading && viewModel.items.isEmpty {
                 LoadingView()
             } else if let error = viewModel.errorMessage, viewModel.items.isEmpty {
@@ -101,11 +71,53 @@ struct DownloadQueueView: View {
                 }
             }
         }
-        // Animate the progress block's appearance/disappearance only on batch
-        // start/finish. The block stays fully absent (no reserved empty space) when
-        // idle because it renders only when `downloadProgress` is non-empty.
+        // Progress banner + inline error are rendered as a TOP SAFE-AREA INSET, not as
+        // siblings above the List. A safeAreaInset adjusts the scroll view's content inset,
+        // which preserves `contentOffset` — so the banner appearing/resizing/disappearing
+        // (every batch start/finish, and each poll tick during active downloads) no longer
+        // reflows the List and throws the scroll to the top. Previously these lived inside a
+        // `.geometryGroup()`'d VStack directly above the List; inserting/animating them
+        // re-laid the whole subtree and reset the List's scroll during active downloads.
+        // The block stays fully absent (zero inset) when idle because it renders nothing when
+        // `downloadProgress` is empty and there is no inline error.
+        .safeAreaInset(edge: .top) {
+            VStack(spacing: 0) {
+                if !viewModel.downloadProgress.isEmpty {
+                    VStack(spacing: 6) {
+                        ForEach(viewModel.downloadProgress, id: \.id) { info in
+                            TaskNotificationBanner(info: info)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                }
+
+                if let error = viewModel.errorMessage, !viewModel.items.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(error)
+                            .font(.subheadline)
+                        Spacer()
+                        Button {
+                            viewModel.errorMessage = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .accessibilityLabel(String(localized: "dismiss"))
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .background(.fill.tertiary)
+                }
+            }
+            // Opaque chrome background so scrolled List content doesn't show through the
+            // inset region. Zero-height (hence invisible) when both children are absent.
+            .background(.bar)
+        }
+        // Animate the banner/error inset appearing/disappearing on batch start/finish.
         .animation(.default, value: viewModel.downloadProgress.isEmpty)
-        .geometryGroup()
         .safeAreaInset(edge: .top) {
             if authState.isPrivileged {
             HStack(spacing: 8) {

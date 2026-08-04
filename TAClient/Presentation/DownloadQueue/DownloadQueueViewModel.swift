@@ -17,6 +17,18 @@ final class DownloadQueueViewModel {
     private var lastPage = 1
     private var canLoadMore: Bool { currentPage < lastPage && !isLoadingMore }
     private var pollingTask: Task<Void, Never>?
+
+    /// Consecutive polling ticks seen with no active download. A single idle tick is
+    /// NOT proof the batch finished — it also occurs during `download_pending` startup
+    /// latency and in the quiet gap between two videos (indexing / thumbnail work emits
+    /// no `download`-prefixed group). Polling stops only after `maxIdlePollsBeforeStop`
+    /// consecutive idle ticks (or instantly via the drained-queue fast-stop). Reset on any
+    /// active tick and at `startPolling`.
+    private var consecutiveIdlePolls = 0
+    /// ~12s (4 × 3s tick) of confirmed inactivity before declaring a non-drained queue
+    /// finished. `internal static` (not private) so tests read the bound instead of
+    /// hardcoding tick counts — treat as a test seam, like `performPollTick`.
+    static let maxIdlePollsBeforeStop = 4
     private var pendingRemovals: Set<String> = []
     private var downloadItemQueue: Set<String> = []
     private var isProcessingDownloadQueue = false
@@ -83,7 +95,7 @@ final class DownloadQueueViewModel {
         } catch {
             pendingRemovals.remove(videoId)
             if !router.handleError(error, errorMessage: &errorMessage) {
-                await loadDownloads(isRefresh: true)
+                await reloadPreservingDepth()
             }
         }
     }
@@ -95,7 +107,7 @@ final class DownloadQueueViewModel {
         do {
             try await downloadRepository.addToQueue(videoId: input)
             addInput = ""
-            await loadDownloads(isRefresh: true)
+            await reloadPreservingDepth()
         } catch {
             router.handleError(error, errorMessage: &errorMessage)
         }
@@ -119,7 +131,7 @@ final class DownloadQueueViewModel {
             try await downloadRepository.killTask(id: task.id)
             stopPolling()
             downloadProgress = []
-            await loadDownloads(isRefresh: true)
+            await reloadPreservingDepth()
         } catch {
             router.handleError(error, errorMessage: &errorMessage)
         }
@@ -150,6 +162,7 @@ final class DownloadQueueViewModel {
 
     func startPolling() {
         guard pollingTask == nil else { return }
+        consecutiveIdlePolls = 0
         pollingTask = Task {
             while !Task.isCancelled {
                 do {
@@ -172,16 +185,35 @@ final class DownloadQueueViewModel {
             let notifications = try await downloadRepository.getNotifications()
             let hasActiveDownload = notifications.contains { $0.group.hasPrefix("download") }
 
-            downloadProgress = notifications
-
-            if !hasActiveDownload {
-                // Batch finished — clear optimistic-removal tracking, then reconcile.
-                pendingRemovals.removeAll()
+            if hasActiveDownload {
+                consecutiveIdlePolls = 0
+                downloadProgress = notifications
                 try await reconcileLoadedPages()
+                return true
+            }
+
+            // No active download THIS tick — could be true completion OR a transient gap
+            // (startup latency / between-videos indexing). Reconcile first, then decide.
+            try await reconcileLoadedPages()
+
+            // Fast-stop: the pending queue drained -> definitely finished.
+            if filter == "pending", items.isEmpty {
+                pendingRemovals.removeAll()
+                downloadProgress = notifications // empty -> banner hides
+                consecutiveIdlePolls = 0
                 return false
             }
 
-            try await reconcileLoadedPages()
+            // Grace window: tolerate inter-video gaps without killing the loop.
+            consecutiveIdlePolls += 1
+            if consecutiveIdlePolls >= Self.maxIdlePollsBeforeStop {
+                pendingRemovals.removeAll()
+                downloadProgress = notifications
+                consecutiveIdlePolls = 0
+                return false
+            }
+            // Within grace: keep the banner stable (don't blank to empty between videos).
+            if !notifications.isEmpty { downloadProgress = notifications }
             return true
         } catch is CancellationError {
             return false
@@ -205,7 +237,7 @@ final class DownloadQueueViewModel {
         // Snapshot the loaded depth: `fetchAllLoadedPages` reads pages 1...currentPage,
         // so its result reflects this depth. The await below is a suspension point.
         let depthBefore = currentPage
-        let (newItems, newLastPage) = try await fetchAllLoadedPages()
+        let (newItems, newLastPage) = try await fetchAllLoadedPages(filter: "pending", upTo: depthBefore)
         // Re-check BOTH the filter (mid-await `onFilterChanged`, see doc comment) AND the
         // loaded depth: a concurrent `loadMoreIfNeeded` can advance `currentPage` and append
         // a new page to `items` while we were awaiting. Applying the shallow snapshot now would
@@ -213,8 +245,34 @@ final class DownloadQueueViewModel {
         // the stale snapshot; the next 3s tick reconciles cleanly at the new depth.
         guard filter == "pending", currentPage == depthBefore else { return }
         applyPolledItems(newItems)
-        lastPage = newLastPage
-        currentPage = min(currentPage, newLastPage)
+        (lastPage, currentPage) = clampDepth(newLastPage: newLastPage, currentPage: currentPage)
+    }
+
+    /// Depth-preserving reload after a mutation (add / stop / error recovery).
+    /// Refetches pages 1...currentPage for the CURRENT filter and reconciles via
+    /// `applyPolledItems` — never collapses to page 1, so the scroll position is kept.
+    /// Does not toggle `isLoading` (silent refresh, no full-screen spinner flash).
+    ///
+    /// NOTE: unlike `reconcileLoadedPages` (which throws so `performPollTick` can swallow
+    /// transient errors and keep polling), this surfaces failures via `router.handleError`
+    /// — mutation reloads are user-initiated and should report. Do not "unify" the two
+    /// error strategies. Filter-aware: works on both the pending and ignore tabs (the
+    /// pending-only no-op of `reconcileLoadedPages` is a polling concern, not a reload one).
+    private func reloadPreservingDepth() async {
+        let depthBefore = currentPage
+        let activeFilter = filter
+        do {
+            let (newItems, newLastPage) = try await fetchAllLoadedPages(
+                filter: activeFilter, upTo: depthBefore
+            )
+            // Drop the snapshot if the user switched tabs or `loadMoreIfNeeded` advanced
+            // depth while we were awaiting — same TOCTOU guard as `reconcileLoadedPages`.
+            guard filter == activeFilter, currentPage == depthBefore else { return }
+            applyPolledItems(newItems)
+            (lastPage, currentPage) = clampDepth(newLastPage: newLastPage, currentPage: currentPage)
+        } catch {
+            router.handleError(error, errorMessage: &errorMessage)
+        }
     }
 
     func stopPolling() {
@@ -234,6 +292,24 @@ final class DownloadQueueViewModel {
                 try await downloadRepository.updateStatus(videoId: id, status: "priority")
             } catch {
                 if router.handleError(error, errorMessage: &errorMessage) { return }
+                continue // non-auth error: skip removal for this id, process the rest
+            }
+
+            // `status: "priority"` pulls the video OUT of the ignore list into the download
+            // queue. On the ignore tab the row no longer belongs here, so drop it with a
+            // SURGICAL in-place removal — the same pattern as `deleteItem` / `updateStatus`.
+            //
+            // Do NOT reassign the whole array here (e.g. `reloadPreservingDepth`): this code
+            // runs inside the LEADING swipe action's Task, and replacing `items` mid-swipe
+            // makes UICollectionView drop the triggered swipe's mask view and reset
+            // contentOffset to the top ("unexpected removal of the current swipe occurrence's
+            // mask view" + list jumps to the top). A single-row removal SwiftUI List animates
+            // in place, so the scroll position and the in-flight swipe are preserved.
+            //
+            // On the pending tab the item stays pending and in place — mutate nothing; the
+            // next poll tick surfaces its new prioritised order without a jump.
+            if filter == "ignore" {
+                items.removeAll { $0.youtubeId == id }
             }
         }
 
@@ -257,17 +333,21 @@ final class DownloadQueueViewModel {
         } catch {
             pendingRemovals.remove(videoId)
             if !router.handleError(error, errorMessage: &errorMessage) {
-                await loadDownloads(isRefresh: true)
+                await reloadPreservingDepth()
             }
         }
     }
 
     // MARK: - Private
 
-    private func fetchAllLoadedPages() async throws -> (items: [DownloadItem], lastPage: Int) {
-        let pagesToFetch = currentPage
+    private func fetchAllLoadedPages(
+        filter: String, upTo pages: Int
+    ) async throws -> (items: [DownloadItem], lastPage: Int) {
+        // Never fetch fewer than 1 page — a corrupted/degenerate `currentPage` (e.g. clamped
+        // to 0 by a bogus `last_page`) must not silently reduce this to a page-1-only refetch.
+        let pagesToFetch = max(1, pages)
         if pagesToFetch <= 1 {
-            let result = try await downloadRepository.getDownloads(page: 1, filter: "pending")
+            let result = try await downloadRepository.getDownloads(page: 1, filter: filter)
             return (result.items, result.lastPage)
         }
 
@@ -276,7 +356,7 @@ final class DownloadQueueViewModel {
         ) { group in
             for page in 1...pagesToFetch {
                 group.addTask {
-                    let result = try await self.downloadRepository.getDownloads(page: page, filter: "pending")
+                    let result = try await self.downloadRepository.getDownloads(page: page, filter: filter)
                     return (page, result)
                 }
             }
@@ -315,5 +395,18 @@ final class DownloadQueueViewModel {
             return true
         }
         return false
+    }
+
+    /// Reconciles the freshly reported `newLastPage` against the loaded depth without ever
+    /// collapsing it. TA reports `last_page: 0` on the final page (see `DownloadRepositoryImpl`
+    /// for the primary fix); this is the defense-in-depth backstop so ANY non-positive /
+    /// below-depth `lastPage` can't clamp `currentPage` to 0 and make the next
+    /// `fetchAllLoadedPages(upTo:)` refetch only page 1 (the download-queue collapse-to-top
+    /// bug). Returns `(lastPage, currentPage)`: a non-positive `newLastPage` keeps the current
+    /// depth; otherwise `currentPage` is clamped down to a genuinely-smaller last page (real
+    /// queue shrink) but never below 1.
+    private func clampDepth(newLastPage: Int, currentPage: Int) -> (lastPage: Int, currentPage: Int) {
+        guard newLastPage >= 1 else { return (max(lastPage, currentPage), currentPage) }
+        return (newLastPage, max(1, min(currentPage, newLastPage)))
     }
 }
