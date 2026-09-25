@@ -29,7 +29,11 @@ actor AuthProxy {
 
     func start() async throws {
         let params = NWParameters.tcp
+        #if !targetEnvironment(simulator)
+        // The simulator's host network stack rejects even 127.0.0.1 peers under
+        // acceptLocalOnly, so the flag only applies on devices.
         params.acceptLocalOnly = true
+        #endif
         let listener = try NWListener(using: params, on: .any)
 
         listener.newConnectionHandler = { [weak self] connection in
