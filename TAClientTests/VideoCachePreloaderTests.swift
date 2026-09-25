@@ -1453,6 +1453,66 @@ extension DataLayerSuite {
         await VideoCachePreloader.shared.clear()
     }
 
+    /// Regression: once `.main` downloaded to EOF the preload task finished
+    /// and nilled itself, and the old `preloadTask != nil` orphan guard then
+    /// refused every later reseed. A backward scrub left `.main` stuck at the
+    /// tail and playback froze on cancelled network fetches. The live
+    /// playback session (`followSessionVideoId`) must keep reseed enabled.
+    @Test func reseedMain_afterPreloadCompletedToEOF_stillReseeds() async {
+        let totalSize = 16 * 1024 * 1024
+        let prefixSize = Int(CacheStore.computePrefixSize(totalSize: Int64(totalSize)))
+        let prefixData = Self.makePayload(size: prefixSize)
+        let mainData = Self.makePayload(size: totalSize - prefixSize)
+
+        Self.installParallelMock(
+            totalSize: totalSize,
+            prefixData: prefixData,
+            mainData: mainData,
+            mainStartByte: prefixSize
+        )
+        defer {
+            VideoCachePreloader.testSessionConfigurationOverride = nil
+            MockResponse.tearDown()
+        }
+
+        await VideoCachePreloader.shared.clear()
+
+        let videoId = "vid-reseed-after-eof"
+        let url = URL(string: "https://ta.example.com/media/\(videoId).mp4")!
+        await VideoCachePreloader.shared.startPreloadWithRetry(
+            videoId: videoId,
+            url: url,
+            token: "test-token",
+            startPosition: 0,
+            duration: 0,
+            maxRetries: 0
+        )
+
+        let store = VideoCachePreloader.shared.store
+        let completed = await Self.pollUntil(timeoutSeconds: 5) {
+            store.regionStatus(videoId: videoId, region: .main)?.endOffset == Int64(totalSize)
+        }
+        #expect(completed, "precondition: main must download to EOF")
+        let finished = await Self.pollUntil(timeoutSeconds: 5) {
+            !(await VideoCachePreloader.shared.isPreloading(videoId: videoId))
+        }
+        #expect(finished, "precondition: the preload task must have finished")
+
+        let reseedByte = Int64(prefixSize + 4 * 1024 * 1024)
+        await VideoCachePreloader.shared.reseedMain(
+            videoId: videoId,
+            atByte: reseedByte,
+            url: url,
+            token: "test-token"
+        )
+
+        let mainAfter = store.regionStatus(videoId: videoId, region: .main)
+        #expect(mainAfter?.startOffset == reseedByte,
+                "reseed must still re-anchor main after the preload finished at EOF")
+
+        await VideoCachePreloader.shared.clear()
+    }
+
     @Test func reseedMain_downloadsCorrectRange() async {
         let totalSize = 16 * 1024 * 1024
         let prefixSize = Int(CacheStore.computePrefixSize(totalSize: Int64(totalSize)))
