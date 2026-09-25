@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import UniformTypeIdentifiers
 import OSLog
 
 private nonisolated let logger = Logger(subsystem: "ru.mzhukov.TAClient", category: "CachingResourceLoader")
@@ -46,6 +47,11 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
 
     nonisolated let activeTasksLock = NSLock()
     nonisolated(unsafe) var activeTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
+
+    /// Result of this loader's own HEAD probe, used when the preloader has no
+    /// cache entry. Guarded by `contentInfoLock`.
+    nonisolated let contentInfoLock = NSLock()
+    nonisolated(unsafe) var probedContentInfo: (length: Int64, mimeType: String?)?
 
     /// Exposed for tests.
     nonisolated func activeTaskCount() -> Int {
@@ -116,9 +122,14 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
         shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
     ) -> Bool {
         let key = ObjectIdentifier(loadingRequest)
-        let task: Task<Void, Never> = Task { [weak self] in
+        let box = LoadingRequestBox(request: loadingRequest)
+        // Detached so the async work never hops to the main actor (the
+        // module's default isolation). Every touch of the loading request
+        // itself goes back through `loaderQueue` — the queue this delegate was
+        // registered on — see `onLoaderQueue`.
+        let task: Task<Void, Never> = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
-            await self.handleLoadingRequest(loadingRequest, key: key)
+            await self.handleLoadingRequest(box, key: key)
         }
         registerTask(task, forKey: key)
         return true
@@ -156,50 +167,102 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
         activeTasksLock.unlock()
     }
 
-    // MARK: - Request Handling
+    // MARK: - Loader queue
 
-    private func handleLoadingRequest(_ loadingRequest: AVAssetResourceLoadingRequest, key: ObjectIdentifier) async {
-        defer { removeActiveTask(forKey: key) }
-
-        guard !loadingRequest.isCancelled, !Task.isCancelled else { return }
-
-        if let contentRequest = loadingRequest.contentInformationRequest {
-            let ok = await fillContentInfo(contentRequest)
-            if !ok {
-                loadingRequest.finishLoading(with: URLError(.cannotOpenFile))
-                return
+    /// Runs `work` on `loaderQueue`, the queue passed to
+    /// `AVAssetResourceLoader.setDelegate(_:queue:)`. AVFoundation delivers
+    /// `shouldWaitForLoadingOfRequestedResource` / `didCancel` on that queue,
+    /// and every read of a loading request's state (`isCancelled`,
+    /// `currentOffset`) and every `respond(with:)` / `finishLoading` must be
+    /// serialized with those callbacks. iOS 27 is strict about this: answering
+    /// from another thread (previously the main actor) races `didCancel` and
+    /// can leave the asset stuck loading.
+    nonisolated private func onLoaderQueue<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            loaderQueue.async {
+                continuation.resume(returning: work())
             }
-        }
-
-        guard !loadingRequest.isCancelled, !Task.isCancelled else { return }
-
-        if let dataRequest = loadingRequest.dataRequest {
-            let ok = await fillDataRequest(dataRequest)
-            if !ok {
-                loadingRequest.finishLoading(with: URLError(.cannotOpenFile))
-                return
-            }
-        }
-
-        if !loadingRequest.isCancelled, !Task.isCancelled {
-            loadingRequest.finishLoading()
         }
     }
 
-    private func fillContentInfo(_ contentRequest: AVAssetResourceLoadingContentInformationRequest) async -> Bool {
+    // MARK: - Request Handling
+
+    nonisolated private func handleLoadingRequest(_ box: LoadingRequestBox, key: ObjectIdentifier) async {
+        defer { removeActiveTask(forKey: key) }
+        guard !Task.isCancelled else { return }
+        let shape = await onLoaderQueue {
+            (cancelled: box.request.isCancelled,
+             wantsContentInfo: box.request.contentInformationRequest != nil,
+             wantsData: box.request.dataRequest != nil)
+        }
+        guard !shape.cancelled else { return }
+
+        if shape.wantsContentInfo {
+            let ok = await fillContentInfo(box)
+            if !ok {
+                await finish(box, error: URLError(.cannotOpenFile))
+                return
+            }
+        }
+
+        guard !Task.isCancelled else { return }
+
+        if shape.wantsData {
+            let ok = await fillDataRequest(box)
+            if !ok {
+                await finish(box, error: URLError(.cannotOpenFile))
+                return
+            }
+        }
+
+        await finish(box, error: nil)
+    }
+
+    /// Finishes the loading request on `loaderQueue`, unless AVFoundation has
+    /// already cancelled it (responding to a cancelled request is an error).
+    nonisolated private func finish(_ box: LoadingRequestBox, error: Error?) async {
+        guard !Task.isCancelled else { return }
+        await onLoaderQueue {
+            let request = box.request
+            guard !request.isCancelled, !request.isFinished else { return }
+            if let error {
+                request.finishLoading(with: error)
+            } else {
+                request.finishLoading()
+            }
+        }
+    }
+
+    nonisolated private func fillContentInfo(_ box: LoadingRequestBox) async -> Bool {
+        guard let info = await resolveContentInfo() else { return false }
+        let contentType = Self.contentTypeUTI(mimeType: info.mimeType, url: originalURL)
+        await onLoaderQueue {
+            guard let contentRequest = box.request.contentInformationRequest else { return }
+            contentRequest.contentLength = info.length
+            contentRequest.contentType = contentType
+            contentRequest.isByteRangeAccessSupported = true
+        }
+        return true
+    }
+
+    /// Total length + MIME type of the resource. Served from the preloader's
+    /// cache entry when present, else from a HEAD request whose result is
+    /// remembered so data requests can clamp against it without re-probing.
+    nonisolated private func resolveContentInfo() async -> (length: Int64, mimeType: String?)? {
         // Task 4 region-aware lookup: `cacheStatus` returns the `.main` region
         // only and is `nil` for small-file entries that only have `.prefix`.
         // For content-info we only need `totalSize` + `contentType`, both of
         // which are entry-scoped (identical across regions), so fall back to
         // the prefix region when main isn't there.
-        let entryStatus = store.cacheStatus(videoId: videoId)
-            ?? store.regionStatus(videoId: videoId, region: .prefix)
-        if let entryStatus {
-            contentRequest.contentLength = entryStatus.totalSize
-            contentRequest.contentType = contentTypeUTI(from: entryStatus.contentType)
-            contentRequest.isByteRangeAccessSupported = true
-            return true
+        if let entryStatus = store.cacheStatus(videoId: videoId)
+            ?? store.regionStatus(videoId: videoId, region: .prefix) {
+            return (entryStatus.totalSize, entryStatus.contentType)
         }
+
+        contentInfoLock.lock()
+        let remembered = probedContentInfo
+        contentInfoLock.unlock()
+        if let remembered { return remembered }
 
         var request = URLRequest(url: originalURL)
         request.httpMethod = "HEAD"
@@ -207,52 +270,76 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
 
         do {
             let (_, response) = try await networkSession.data(for: request)
-            if handleUnauthorizedIfNeeded(response: response) { return false }
-            if let http = response as? HTTPURLResponse {
-                // Only populate content-info on a successful response with a
-                // known content length. A 302 / 404 / 500, or a 2xx missing
-                // the `Content-Length` header, would otherwise set
-                // `contentLength` from `expectedContentLength` (which is -1
-                // when the header is absent), handing AVPlayer a nonsense
-                // asset description.
-                guard (200...299).contains(http.statusCode) else {
-                    logger.error("HEAD request returned non-success status \(http.statusCode)")
-                    return false
-                }
-                guard http.expectedContentLength > 0 else {
-                    logger.error("HEAD response missing Content-Length for \(self.videoId)")
-                    return false
-                }
-                contentRequest.contentLength = http.expectedContentLength
-                let mimeType = http.value(forHTTPHeaderField: "Content-Type") ?? "video/mp4"
-                contentRequest.contentType = contentTypeUTI(from: mimeType)
-                contentRequest.isByteRangeAccessSupported = true
-                return true
+            if handleUnauthorizedIfNeeded(response: response) { return nil }
+            guard let http = response as? HTTPURLResponse else { return nil }
+            // Only populate content-info on a successful response with a
+            // known content length. A 302 / 404 / 500, or a 2xx missing
+            // the `Content-Length` header, would otherwise set
+            // `contentLength` from `expectedContentLength` (which is -1
+            // when the header is absent), handing AVPlayer a nonsense
+            // asset description.
+            guard (200...299).contains(http.statusCode) else {
+                logger.error("HEAD request returned non-success status \(http.statusCode)")
+                return nil
             }
+            guard http.expectedContentLength > 0 else {
+                logger.error("HEAD response missing Content-Length for \(self.videoId)")
+                return nil
+            }
+            let info = (length: http.expectedContentLength,
+                        mimeType: http.value(forHTTPHeaderField: "Content-Type"))
+            contentInfoLock.lock()
+            probedContentInfo = info
+            contentInfoLock.unlock()
+            return info
         } catch {
             logger.error("HEAD request failed: \(error.localizedDescription)")
         }
-        return false
+        return nil
     }
 
-    private func fillDataRequest(_ dataRequest: AVAssetResourceLoadingDataRequest) async -> Bool {
+    nonisolated private func fillDataRequest(_ box: LoadingRequestBox) async -> Bool {
+        let request = await onLoaderQueue { () -> (offset: Int64, length: Int, toEnd: Bool)? in
+            guard let dataRequest = box.request.dataRequest else { return nil }
+            return (dataRequest.requestedOffset, dataRequest.requestedLength,
+                    dataRequest.requestsAllDataToEndOfResource)
+        }
+        guard let request else { return true }
+
+        // Clamp the request to the resource's real length. AVPlayer on iOS 27
+        // issues open-ended `requestsAllDataToEndOfResource` requests (where
+        // `requestedLength` is not the amount it wants) and ranges that run
+        // past EOF; asking the server for bytes beyond EOF returns 416 and
+        // fails the whole load.
+        let contentLength = await resolveContentInfo()?.length
+        guard let end = Self.requestedEndOffset(
+            requestedOffset: request.offset,
+            requestedLength: request.length,
+            requestsAllDataToEnd: request.toEnd,
+            contentLength: contentLength
+        ) else {
+            logger.error("Cannot serve to-end request without a content length for \(self.videoId)")
+            return false
+        }
+
         // Loop: read up to 16 MB per iteration (cache first, then network fallback),
-        // calling `respond(with:)` each time, until the full requested length is
+        // calling `respond(with:)` each time, until the clamped range is
         // satisfied or the task is cancelled.
         while !Task.isCancelled {
-            let offset = dataRequest.currentOffset
-            let remaining = dataRequest.requestedLength
-                - Int(dataRequest.currentOffset - dataRequest.requestedOffset)
+            guard let offset = await onLoaderQueue({ () -> Int64? in
+                box.request.isCancelled ? nil : box.request.dataRequest?.currentOffset
+            }) else { return false }
+            let remaining = end - offset
             if remaining <= 0 { return true }
 
             // Try reading from cache first (sync, NSLock-guarded — no executor hop)
-            let cacheLength = min(remaining, maxCacheResponseSize)
+            let cacheLength = Int(min(remaining, Int64(maxCacheResponseSize)))
             if let cachedData = store.readData(
                 videoId: videoId,
                 offset: offset,
                 length: cacheLength
             ), !cachedData.isEmpty {
-                dataRequest.respond(with: cachedData)
+                await respond(box, with: cachedData)
                 continue
             }
 
@@ -264,16 +351,58 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             // notes ("Network fallback ALWAYS competes with preload").
             if let graceData = await waitForPreloaderData(offset: offset, length: cacheLength),
                !graceData.isEmpty {
-                dataRequest.respond(with: graceData)
+                await respond(box, with: graceData)
                 continue
             }
 
             // Cache miss: fetch from network (capped — data(for:) buffers entire response in memory)
-            let networkLength = min(remaining, maxNetworkResponseSize)
-            let ok = await fetchFromNetwork(dataRequest: dataRequest, offset: offset, length: networkLength)
-            if !ok { return false }
+            let networkLength = Int(min(remaining, Int64(maxNetworkResponseSize)))
+            switch await fetchFromNetwork(offset: offset, length: networkLength) {
+            case .data(let data):
+                await respond(box, with: data)
+            case .endOfResource:
+                // The server says there is nothing at `offset` (416). The
+                // resource is shorter than we were told; everything that
+                // exists has been delivered, so finish instead of failing.
+                return true
+            case .failed:
+                return false
+            }
         }
         return !Task.isCancelled
+    }
+
+    nonisolated private func respond(_ box: LoadingRequestBox, with data: Data) async {
+        await onLoaderQueue {
+            guard !box.request.isCancelled else { return }
+            box.request.dataRequest?.respond(with: data)
+        }
+    }
+
+    /// Exclusive end offset a data request should be served up to, or `nil`
+    /// when the request wants everything to EOF but the length is unknown.
+    ///
+    /// - `requestsAllDataToEnd`: the end is the content length;
+    ///   `requestedLength` is ignored (AVFoundation documents it as not
+    ///   meaningful for such requests).
+    /// - Otherwise `requestedOffset + requestedLength`, clamped to the
+    ///   content length when known so we never ask the server past EOF.
+    nonisolated static func requestedEndOffset(
+        requestedOffset: Int64,
+        requestedLength: Int,
+        requestsAllDataToEnd: Bool,
+        contentLength: Int64?
+    ) -> Int64? {
+        let knownLength = contentLength.flatMap { $0 > 0 ? $0 : nil }
+        if requestsAllDataToEnd {
+            return knownLength
+        }
+        let (sum, overflow) = requestedOffset.addingReportingOverflow(Int64(max(requestedLength, 0)))
+        let naturalEnd = overflow ? Int64.max : sum
+        if let knownLength {
+            return min(naturalEnd, knownLength)
+        }
+        return naturalEnd
     }
 
     /// Task 11 / B4 — Brief wait for the preloader to deliver requested bytes
@@ -312,7 +441,7 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     /// dedup loop directly (AVAssetResourceLoadingDataRequest has no public
     /// initializer, so we can't drive `fillDataRequest` end-to-end from Swift
     /// Testing).
-    func waitForPreloaderData(offset: Int64, length: Int) async -> Data? {
+    nonisolated func waitForPreloaderData(offset: Int64, length: Int) async -> Data? {
         guard let endOffset = relevantEndOffset(forOffset: offset) else { return nil }
         guard offset >= endOffset else { return nil }
         guard offset - endOffset < coverSoonWindow else { return nil }
@@ -340,7 +469,7 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     /// - `offset < main.startOffset` (or no main): prefix.endOffset
     /// - otherwise: main.endOffset
     /// Returns `nil` only when neither region exists.
-    private func relevantEndOffset(forOffset offset: Int64) -> Int64? {
+    nonisolated private func relevantEndOffset(forOffset offset: Int64) -> Int64? {
         let prefix = store.regionStatus(videoId: videoId, region: .prefix)
         let main = store.regionStatus(videoId: videoId, region: .main)
 
@@ -362,11 +491,14 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
         return prefix?.endOffset
     }
 
-    private func fetchFromNetwork(
-        dataRequest: AVAssetResourceLoadingDataRequest,
-        offset: Int64,
-        length: Int
-    ) async -> Bool {
+    nonisolated enum NetworkFetchResult {
+        case data(Data)
+        /// 416 Range Not Satisfiable: nothing exists at the requested offset.
+        case endOfResource
+        case failed
+    }
+
+    nonisolated private func fetchFromNetwork(offset: Int64, length: Int) async -> NetworkFetchResult {
         var request = URLRequest(url: originalURL)
         request.setValue("Token \(token)", forHTTPHeaderField: "Authorization")
         let endByte = offset + Int64(length) - 1
@@ -374,18 +506,25 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
 
         do {
             let (data, response) = try await networkSession.data(for: request)
-            if handleUnauthorizedIfNeeded(response: response) { return false }
-            guard let http = response as? HTTPURLResponse,
-                  (200...299).contains(http.statusCode) || http.statusCode == 206 else {
-                logger.error("Network fetch failed: status \((response as? HTTPURLResponse)?.statusCode ?? 0)")
-                return false
+            if handleUnauthorizedIfNeeded(response: response) { return .failed }
+            guard let http = response as? HTTPURLResponse else {
+                logger.error("Network fetch failed: non-HTTP response")
+                return .failed
+            }
+            if http.statusCode == 416 {
+                logger.warning("Network fetch at offset \(offset) is past EOF (416); finishing request")
+                return .endOfResource
+            }
+            guard (200...299).contains(http.statusCode) else {
+                logger.error("Network fetch failed: status \(http.statusCode)")
+                return .failed
             }
             // Guard: 200/206 with empty body would cause `fillDataRequest`'s
             // while-loop to spin forever (currentOffset never advances). Treat
             // as a fatal response so the outer loop surfaces the failure.
             guard !data.isEmpty else {
                 logger.error("Network fetch returned 0 bytes at offset \(offset) — aborting to avoid infinite loop")
-                return false
+                return .failed
             }
             // Defensive: if a server ignored our Range header and returned the
             // full resource (200 OK with expectedContentLength == totalSize),
@@ -415,11 +554,10 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             } else {
                 sliced = data
             }
-            dataRequest.respond(with: sliced)
-            return true
+            return .data(sliced)
         } catch {
             logger.error("Network fetch error at offset \(offset): \(error.localizedDescription)")
-            return false
+            return .failed
         }
     }
 
@@ -431,7 +569,7 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     /// out). Centralised so both `fillContentInfo` and `fetchFromNetwork`
     /// share one detection path, and so unit tests can exercise the
     /// dispatch logic directly without an `AVAssetResourceLoadingRequest`.
-    func handleUnauthorizedIfNeeded(response: URLResponse?) -> Bool {
+    nonisolated func handleUnauthorizedIfNeeded(response: URLResponse?) -> Bool {
         guard let http = response as? HTTPURLResponse else { return false }
         if http.statusCode == 401 || http.statusCode == 403 {
             logger.error("Unauthorized for \(self.videoId): \(http.statusCode)")
@@ -444,13 +582,43 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
         return false
     }
 
-    private func contentTypeUTI(from mimeType: String) -> String {
-        switch mimeType.lowercased() {
-        case let t where t.contains("mp4"): return "public.mpeg-4"
-        case let t where t.contains("webm"): return "org.webmproject.webm"
-        case let t where t.contains("matroska"): return "org.matroska.mkv"
-        case let t where t.contains("mkv"): return "org.matroska.mkv"
-        default: return "public.movie"
+    /// UTI for `contentInformationRequest.contentType`.
+    ///
+    /// iOS 27's AVFoundation no longer accepts the abstract `public.movie`
+    /// as a container type, so this must name a concrete container. Order:
+    /// 1. the server's MIME type, when it maps to an audiovisual UTType
+    ///    (parameters like `; charset=` are ignored);
+    /// 2. the URL's file extension (TA serves `…/<id>.mp4`), covering servers
+    ///    that answer `application/octet-stream` or omit `Content-Type`;
+    /// 3. `public.mpeg-4`, the container Tube Archivist writes and the only
+    ///    one the AVPlayer path handles (VP8/VP9 go through VLC).
+    nonisolated static func contentTypeUTI(mimeType: String?, url: URL) -> String {
+        if let mimeType {
+            let essence = mimeType
+                .split(separator: ";", maxSplits: 1)
+                .first
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+            if let type = UTType(mimeType: essence), type.conforms(to: .audiovisualContent) {
+                return type.identifier
+            }
+            if essence.contains("webm") { return "org.webmproject.webm" }
+            if essence.contains("matroska") || essence.contains("mkv") { return "org.matroska.mkv" }
         }
+        let ext = url.pathExtension
+        if !ext.isEmpty,
+           let type = UTType(filenameExtension: ext),
+           type.conforms(to: .audiovisualContent) {
+            return type.identifier
+        }
+        return UTType.mpeg4Movie.identifier
     }
 }
+
+/// Carries a non-`Sendable` loading request into the detached handler task.
+/// Safe because the handler only touches the request inside
+/// `CachingResourceLoader.onLoaderQueue`, i.e. serialized on the loader's
+/// delegate queue.
+nonisolated struct LoadingRequestBox: @unchecked Sendable {
+    let request: AVAssetResourceLoadingRequest
+}
+
