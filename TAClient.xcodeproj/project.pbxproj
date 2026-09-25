@@ -289,7 +289,7 @@
 			mainGroup = 27D79B0D2F3FA4BE00E87BCA;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				CC0000012F3FA4BE00000001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM" */,
+				CC0000012F3FA4BE00000001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM-Lite" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 27D79B172F3FA4BE00E87BCA /* Products */;
@@ -769,12 +769,12 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		CC0000012F3FA4BE00000001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM" */ = {
+		CC0000012F3FA4BE00000001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM-Lite" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/MobileVLCKit-SPM/MobileVLCKit-SPM";
+			repositoryURL = "https://github.com/MobileVLCKit-SPM/MobileVLCKit-SPM-Lite";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 3.5.1;
+				minimumVersion = 3.7.3;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -782,7 +782,7 @@
 /* Begin XCSwiftPackageProductDependency section */
 		CC0000022F3FA4BE00000002 /* MobileVLCKit */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = CC0000012F3FA4BE00000001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM" */;
+			package = CC0000012F3FA4BE00000001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM-Lite" */;
 			productName = MobileVLCKit;
 		};
 /* End XCSwiftPackageProductDependency section */

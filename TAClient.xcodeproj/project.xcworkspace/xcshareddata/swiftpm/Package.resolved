@@ -1,13 +1,13 @@
 {
-  "originHash" : "8dcad2c2aafc2f0d260766b9208f22015821e12c37de975b607d113e2b1d8803",
+  "originHash" : "236c2c7ff1aa4ef90d1495c583f7f0d3343b20327df1ed792b1599512c7d5781",
   "pins" : [
     {
-      "identity" : "mobilevlckit-spm",
+      "identity" : "mobilevlckit-spm-lite",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/MobileVLCKit-SPM/MobileVLCKit-SPM",
+      "location" : "https://github.com/MobileVLCKit-SPM/MobileVLCKit-SPM-Lite",
       "state" : {
-        "revision" : "7678f12e04c56573295b32de9480d2136d3d8358",
-        "version" : "3.7.2"
+        "revision" : "208d2602776767e2cdd8cc918f4b6463bc462e17",
+        "version" : "3.7.3"
       }
     }
   ],
