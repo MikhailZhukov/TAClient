@@ -84,6 +84,21 @@ actor VideoCachePreloader {
     /// (Task 4 of `20260527-fix-memory-pressure-recovery.md`). The
     /// `@testable import` already restricts visibility to test-linked builds.
     var lastCancelledVideoId: String?
+    /// VideoId whose playback session the cache is following, independent of
+    /// whether a download is running right now. Set by
+    /// `startPreloadWithRetry` (including its cache-sufficient early return),
+    /// cleared by `cancelPreload` (navigate-away), `invalidatePreload`
+    /// (`.critical`; the restart hook re-establishes it) and `clear()`.
+    ///
+    /// `reseedMain`'s orphan guard accepts this OR a live `preloadTask`.
+    /// Checking `preloadTask` alone disabled reseed for the rest of the
+    /// session once `.main` had downloaded to EOF (the task finishes and
+    /// nils itself): a later backward scrub left `.main` stuck at the tail,
+    /// every AVPlayer read fell through to 16 MB network fetches that
+    /// AVPlayer kept cancelling, and playback froze.
+    ///
+    /// Exposed `internal` for `VideoCachePreloaderTests`.
+    var followSessionVideoId: String?
     private var memoryPressureSource: (any DispatchSourceMemoryPressure)?
 
     /// Defensive belt-and-suspenders bound for `reseedMain`'s drain loop. A
@@ -207,11 +222,15 @@ actor VideoCachePreloader {
         preloadTask?.cancel()
         preloadTask = nil
         preloadTaskVideoId = nil
+        followSessionVideoId = nil
     }
 
     // MARK: - Preloading
 
     func cancelPreload(videoId: String) {
+        if followSessionVideoId == videoId {
+            followSessionVideoId = nil
+        }
         guard store.currentVideoId() == videoId else { return }
         preloadTask?.cancel()
         preloadTask = nil
@@ -254,6 +273,7 @@ actor VideoCachePreloader {
         preloadTask?.cancel()
         preloadTask = nil
         preloadTaskVideoId = nil
+        followSessionVideoId = nil
         store.clear()
     }
 
@@ -303,7 +323,11 @@ actor VideoCachePreloader {
         // The mirror check AFTER the drain (`lastCancelledVideoId == videoId`)
         // catches navigate-away that happens DURING the drain's suspension —
         // see the post-drain block below.
-        guard preloadTask != nil else { return }
+        //
+        // A finished preload also leaves `preloadTask` nil while the user is
+        // still watching (`.main` reached EOF), so the live playback session
+        // (`followSessionVideoId`) counts as "something to follow" too.
+        guard preloadTask != nil || followSessionVideoId == videoId else { return }
 
         // Snapshot generation at entry. Used post-drain to bail if any peer
         // mutation (cancelPreload + startPreloadWithRetry for the SAME video,
@@ -931,6 +955,7 @@ actor VideoCachePreloader {
     /// fast-path). Otherwise cancels any in-flight preload, clears the store,
     /// and kicks off a fresh download loop with retry on transient errors.
     func startPreloadWithRetry(videoId: String, url: URL, token: String, startPosition: Double = 0, duration: Double = 0, maxRetries: Int = 2) {
+        followSessionVideoId = videoId
         if isCacheSufficient(videoId: videoId, startPosition: startPosition, duration: duration) {
             return
         }
