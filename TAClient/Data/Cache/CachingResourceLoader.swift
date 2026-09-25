@@ -5,9 +5,9 @@ import OSLog
 
 private nonisolated let logger = Logger(subsystem: "ru.mzhukov.TAClient", category: "CachingResourceLoader")
 
-private let cachingScheme = "itacache"
-private let maxCacheResponseSize = 16 * 1024 * 1024  // 16 MB max per cache read
-private let maxNetworkResponseSize = 16 * 1024 * 1024 // 16 MB max per network fetch (data(for:) buffers entire response)
+private nonisolated let cachingScheme = "itacache"
+private nonisolated let maxCacheResponseSize = 16 * 1024 * 1024  // 16 MB max per cache read
+private nonisolated let maxNetworkResponseSize = 16 * 1024 * 1024 // 16 MB max per network fetch (data(for:) buffers entire response)
 
 // MARK: - Task 11 / B4 — Request dedup constants
 //
@@ -16,9 +16,9 @@ private let maxNetworkResponseSize = 16 * 1024 * 1024 // 16 MB max per network f
 // requested offset, briefly wait for the preloader to catch up rather than
 // firing a duplicate network request (which would steal a TCP connection
 // from the preloader per the VideoCache architecture notes).
-private let coverSoonWindow: Int64 = 8 * 1024 * 1024  // 8 MB
-private let graceSleepMs: UInt64 = 200                // 200 ms between retries
-private let maxGraceAttempts = 3                       // up to 600 ms total
+private nonisolated let coverSoonWindow: Int64 = 8 * 1024 * 1024  // 8 MB
+private nonisolated let graceSleepMs: UInt64 = 200                // 200 ms between retries
+private nonisolated let maxGraceAttempts = 3                       // up to 600 ms total
 
 final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     nonisolated let videoId: String
@@ -259,10 +259,7 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             return (entryStatus.totalSize, entryStatus.contentType)
         }
 
-        contentInfoLock.lock()
-        let remembered = probedContentInfo
-        contentInfoLock.unlock()
-        if let remembered { return remembered }
+        if let remembered = contentInfoLock.withLock({ probedContentInfo }) { return remembered }
 
         var request = URLRequest(url: originalURL)
         request.httpMethod = "HEAD"
@@ -288,9 +285,7 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             }
             let info = (length: http.expectedContentLength,
                         mimeType: http.value(forHTTPHeaderField: "Content-Type"))
-            contentInfoLock.lock()
-            probedContentInfo = info
-            contentInfoLock.unlock()
+            contentInfoLock.withLock { probedContentInfo = info }
             return info
         } catch {
             logger.error("HEAD request failed: \(error.localizedDescription)")
