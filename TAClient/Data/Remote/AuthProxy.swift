@@ -2,12 +2,23 @@ import Foundation
 import Network
 import OSLog
 
+/// Local HTTP proxy that adds the `Authorization: Token` header to requests
+/// for server media. Used wherever the player cannot attach the header itself:
+/// VLCKit (no custom headers), AVPlayer's direct-streaming fallback, and
+/// AirPlay (the receiver fetches the URL on its own, never sees request
+/// headers, and TA accepts the token only as a header).
+///
+/// The listener accepts local-network peers so an AirPlay receiver can reach
+/// it. Every proxy URL starts with a random per-instance path secret, and
+/// requests without it are refused, so other devices on the network cannot
+/// use the proxy to reach the server with the user's token.
 actor AuthProxy {
     private static let logger = Logger(subsystem: "ru.mzhukov.TAClient", category: "AuthProxy")
     private var listener: NWListener?
     private var port: UInt16 = 0
     private let token: String
     private let serverBaseURL: URL
+    private let pathSecret = UUID().uuidString
 
     var localPort: UInt16 { port }
 
@@ -87,14 +98,64 @@ actor AuthProxy {
         port = 0
     }
 
+    /// Loopback URL for `originalURL`, for players running in this app.
     func proxyURL(for originalURL: URL) -> URL? {
-        guard port > 0 else { return nil }
+        proxyURL(for: originalURL, host: "127.0.0.1")
+    }
+
+    /// Local-network URL for `originalURL`, for an AirPlay receiver that
+    /// fetches the media itself. `nil` when the device has no local-network
+    /// IPv4 address (AirPlay needs Wi-Fi or Ethernet anyway).
+    func networkURL(for originalURL: URL) -> URL? {
+        guard let host = Self.localNetworkIPv4Address() else { return nil }
+        return proxyURL(for: originalURL, host: host)
+    }
+
+    private func proxyURL(for originalURL: URL, host: String) -> URL? {
+        guard port > 0,
+              let original = URLComponents(url: originalURL, resolvingAgainstBaseURL: false) else { return nil }
         var components = URLComponents()
         components.scheme = "http"
-        components.host = "127.0.0.1"
+        components.host = host
         components.port = Int(port)
-        components.path = originalURL.path
+        components.percentEncodedPath = "/" + pathSecret + original.percentEncodedPath
+        components.percentEncodedQuery = original.percentEncodedQuery
         return components.url
+    }
+
+    /// Server path for a proxied request target, or `nil` when the target
+    /// lacks the path secret. Only origin-form targets (`/secret/...`) are
+    /// accepted, so the proxy never forwards to a host other than the server.
+    nonisolated static func upstreamPath(forRequestTarget target: String, secret: String) -> String? {
+        let prefix = "/" + secret + "/"
+        guard target.hasPrefix(prefix) else { return nil }
+        return "/" + target.dropFirst(prefix.count)
+    }
+
+    /// IPv4 address of the Wi-Fi (`en0`) interface, falling back to any other
+    /// active `en*` interface (Ethernet adapters on iPad).
+    nonisolated static func localNetworkIPv4Address() -> String? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        defer { freeifaddrs(ifaddr) }
+
+        var fallback: String?
+        for entry in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let flags = Int32(entry.pointee.ifa_flags)
+            guard flags & (IFF_UP | IFF_RUNNING) == (IFF_UP | IFF_RUNNING),
+                  flags & IFF_LOOPBACK == 0,
+                  let addr = entry.pointee.ifa_addr,
+                  addr.pointee.sa_family == UInt8(AF_INET) else { continue }
+            let name = String(cString: entry.pointee.ifa_name)
+            guard name.hasPrefix("en") else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count),
+                              nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            let address = host.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+            if name == "en0" { return address }
+            if fallback == nil { fallback = address }
+        }
+        return fallback
     }
 
     // MARK: - Request processing
@@ -118,7 +179,14 @@ actor AuthProxy {
         }
 
         let method = String(parts[0])
-        let path = String(parts[1])
+        guard method == "GET" || method == "HEAD" else {
+            Self.sendError(connection, code: 405)
+            return
+        }
+        guard let path = Self.upstreamPath(forRequestTarget: String(parts[1]), secret: pathSecret) else {
+            Self.sendError(connection, code: 404)
+            return
+        }
 
         // Extract Range header
         var rangeHeader: String?
@@ -131,19 +199,9 @@ actor AuthProxy {
 
         // Build upstream URL
         let baseStr = serverBaseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let upstreamURL: URL
-        if path.hasPrefix("/") {
-            guard let url = URL(string: baseStr + path) else {
-                connection.cancel()
-                return
-            }
-            upstreamURL = url
-        } else {
-            guard let url = URL(string: path) else {
-                connection.cancel()
-                return
-            }
-            upstreamURL = url
+        guard let upstreamURL = URL(string: baseStr + path) else {
+            connection.cancel()
+            return
         }
 
         var request = URLRequest(url: upstreamURL)
@@ -244,6 +302,8 @@ actor AuthProxy {
         case 401: "Unauthorized"
         case 403: "Forbidden"
         case 404: "Not Found"
+        case 405: "Method Not Allowed"
+        case 416: "Range Not Satisfiable"
         case 500: "Internal Server Error"
         case 502: "Bad Gateway"
         default: nil

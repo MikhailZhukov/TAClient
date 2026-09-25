@@ -86,12 +86,12 @@ final class VideoDetailViewModel {
     @ObservationIgnored
     nonisolated(unsafe) private var lastExplicitSeekAt: CFAbsoluteTime = VideoDetailViewModel.resetExplicitSeekTimestamp()
     /// Snapshot of the streaming URL used to build the currently-playing
-    /// asset. Captured in `configureAsset` so the 1Hz reseed trigger can pass
+    /// asset. Captured at asset construction so the 1Hz reseed trigger can pass
     /// the SAME URL to `VideoCachePreloader.reseedMain` that AVPlayer is
     /// currently using — including after an AirPlay swap rebuilds the asset.
     /// Cleared in `stopPlayback`. Same isolation story as the other
     /// progressQueue-touched scalars: read on the time observer's queue,
-    /// written from the MainActor `configureAsset` / `stopPlayback` paths,
+    /// written from the MainActor asset-construction / `stopPlayback` paths,
     /// guarded by `progressStateLock`.
     @ObservationIgnored
     nonisolated(unsafe) private var streamingURL: URL?
@@ -188,7 +188,8 @@ final class VideoDetailViewModel {
     /// to short-circuit reseed dispatch when the cache is bypassed — writing
     /// to `.main` while AVPlayer is on a direct asset wastes bandwidth on bytes
     /// the player will never read. Writes happen on the MainActor in
-    /// `configureAsset` / `handleAirPlayBecameActive` / `stopPlayback`.
+    /// `makeCachingAsset` / `startDirectAVPlayback` / `switchToAirPlayAsset` /
+    /// `stopPlayback`.
     ///
     /// `nonisolated(unsafe)` + `progressStateLock`-guarded matches the existing
     /// pattern of `streamingURL`, `authToken`, `lastReseedAt`, and
@@ -197,6 +198,9 @@ final class VideoDetailViewModel {
     /// on the MainActor ⇄ progressQueue boundary.
     @ObservationIgnored
     nonisolated(unsafe) private var isUsingDirectAsset = false
+    /// `true` while the player item streams from the auth proxy's
+    /// local-network URL, i.e. an AirPlay receiver can fetch it. MainActor only.
+    private var isAirPlayAssetActive = false
     private var sessionCoordinator: PlayerSessionCoordinator?
     private var nowPlaying: NowPlayingController?
 
@@ -285,7 +289,39 @@ final class VideoDetailViewModel {
               let url = URL(string: video.mediaUrl),
               let token = authState.token else { return }
 
-        let asset = configureAsset(url: url, videoId: video.youtubeId, token: token)
+        let airPlay = isAirPlayActive()
+        if !airPlay, let asset = makeCachingAsset(url: url, videoId: video.youtubeId, token: token) {
+            beginAVPlayback(with: asset, video: video)
+            return
+        }
+        Task { await startDirectAVPlayback(video: video, url: url, token: token, forAirPlay: airPlay) }
+    }
+
+    /// Direct streaming (AirPlay, or the caching-URL fallback) reads through
+    /// the local auth proxy, which starts asynchronously. AirPlay gets a
+    /// local-network URL the receiver can fetch; the fallback gets loopback.
+    private func startDirectAVPlayback(video: Video, url: URL, token: String, forAirPlay: Bool) async {
+        let proxied = await proxiedURL(for: url, token: token, forAirPlay: forAirPlay)
+        // `stopPlayback()` may have run while the proxy was starting.
+        guard isBuffering, player == nil else {
+            stopAuthProxy()
+            return
+        }
+        if let proxied {
+            snapshotPlaybackContext(url: url, token: token, isDirectAsset: true)
+            isAirPlayAssetActive = forAirPlay
+            beginAVPlayback(with: AVURLAsset(url: proxied), video: video)
+        } else if forAirPlay, let asset = makeCachingAsset(url: url, videoId: video.youtubeId, token: token) {
+            // No local-network address to hand the receiver: play on this
+            // device from the cache rather than failing outright.
+            logger.error("AirPlay active but no local-network address for the auth proxy; playing locally")
+            beginAVPlayback(with: asset, video: video)
+        } else {
+            handlePlaybackFailure(message: String(localized: "player_error_network"))
+        }
+    }
+
+    private func beginAVPlayback(with asset: AVURLAsset, video: Video) {
         let playerItem = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: [.tracks, .duration])
         configurePlayerItemAppetite(playerItem)
         let avPlayer = AVPlayer(playerItem: playerItem)
@@ -313,23 +349,21 @@ final class VideoDetailViewModel {
     }
 
     /// Locked write of `streamingURL` + `authToken` (and optionally
-    /// `isUsingDirectAsset`). Extracted from `configureAsset` so the snapshot
+    /// `isUsingDirectAsset`). Extracted from asset construction so the snapshot
     /// side-effect is unit-testable in isolation (no AVPlayer / asset
     /// construction required). `internal` visibility — not `private` — so
     /// `@testable import TAClient` can exercise it directly; in production
-    /// it is called from `configureAsset` (URL/token only — direct-asset bit
-    /// is written separately for compatibility with cachingURL fallback path)
-    /// and `handleAirPlayBecameActive` (all three atomically — see Step 0 of
+    /// it is called from `makeCachingAsset`, `startDirectAVPlayback` and
+    /// `switchToAirPlayAsset` (all three fields atomically — see Step 0 of
     /// `evaluateReseedDispatch`: the bypass flag MUST transition under the
     /// same lock acquisition as the new URL/token, otherwise a 1Hz observer
     /// tick can land between the snapshot and the flag write and dispatch
     /// `reseedMain` with the direct-asset URL/token).
     ///
     /// Passing `isDirectAsset: nil` leaves `isUsingDirectAsset` untouched —
-    /// callers that want to write only the URL/token pair (e.g. `configureAsset`
-    /// at the top of the method, before its branch picks the asset shape) use
-    /// the default. Callers that need the three-field atomic transition pass
-    /// the explicit boolean.
+    /// callers that want to write only the URL/token pair use the default.
+    /// Callers that need the three-field atomic transition pass the explicit
+    /// boolean.
     func snapshotPlaybackContext(url: URL?, token: String?, isDirectAsset: Bool? = nil) {
         progressStateLock.withLock {
             self.streamingURL = url
@@ -448,8 +482,8 @@ final class VideoDetailViewModel {
     ///
     /// Read under `progressStateLock` to match the `nonisolated(unsafe)`
     /// write contract on `isUsingDirectAsset`: writes happen on the MainActor
-    /// (`configureAsset`, `handleAirPlayBecameActive`, `stopPlayback`); this
-    /// read happens on `progressQueue` (background).
+    /// (`makeCachingAsset`, `startDirectAVPlayback`, `switchToAirPlayAsset`,
+    /// `stopPlayback`); this read happens on `progressQueue` (background).
     nonisolated private func checkDirectAssetBypass() -> Bool {
         progressStateLock.withLock { self.isUsingDirectAsset }
     }
@@ -514,7 +548,7 @@ final class VideoDetailViewModel {
                 return nil
             }
             // Guard `url != nil && token != nil` BEFORE advancing timestamps.
-            // Both are set together in `configureAsset` and cleared together
+            // Both are set together at asset construction and cleared together
             // in `stopPlayback`, so in practice they are always both nil or
             // both non-nil. The defensive pair-check guards against a future
             // refactor that diverges them — AND against a `stopPlayback`-
@@ -621,44 +655,64 @@ final class VideoDetailViewModel {
         }
     }
 
-    /// Builds the `AVURLAsset` according to the active route. Side effects
-    /// (setting `isUsingDirectAsset`, retaining the caching loader, snapshotting
-    /// the streaming URL + token for the 1Hz reseed trigger) live here so the
-    /// caller stays declarative. Snapshotting at the asset-construction
-    /// chokepoint — called by both `startAVPlayback` AND
-    /// `handleAirPlayBecameActive` — guarantees reseed always dispatches with
-    /// the auth context of the currently-playing asset.
-    private func configureAsset(url: URL, videoId: String, token: String) -> AVURLAsset {
+    /// Builds the caching-loader asset, or `nil` when the `itacache://` URL
+    /// cannot be formed. Side effects (retaining the caching loader,
+    /// snapshotting the streaming URL + token for the 1Hz reseed trigger) live
+    /// here so the caller stays declarative. Direct-streaming assets snapshot
+    /// in `startDirectAVPlayback` / `switchToAirPlayAsset`, so reseed always
+    /// dispatches with the auth context of the currently-playing asset.
+    private func makeCachingAsset(url: URL, videoId: String, token: String) -> AVURLAsset? {
+        guard let cachingURL = CachingResourceLoader.cachingURL(from: url) else { return nil }
         // Snapshot URL/token AND isUsingDirectAsset atomically — the fused
-        // overload writes all three under one `progressStateLock` acquisition.
-        // Passing the explicit boolean here (rather than relying on a
-        // post-snapshot assignment) guarantees that a 1Hz observer tick on
-        // `progressQueue` cannot observe a torn state where the new URL/token
-        // pair is visible but the bypass flag still reflects the previous
-        // asset's mode.
-        if isAirPlayActive() {
-            snapshotPlaybackContext(url: url, token: token, isDirectAsset: true)
-            return AVURLAsset(
-                url: url,
-                options: ["AVURLAssetHTTPHeaderFieldsKey": ["Authorization": "Token \(token)"]]
-            )
+        // overload writes all three under one `progressStateLock` acquisition,
+        // so a 1Hz observer tick on `progressQueue` cannot observe a torn
+        // state where the new URL/token pair is visible but the bypass flag
+        // still reflects the previous asset's mode.
+        snapshotPlaybackContext(url: url, token: token, isDirectAsset: false)
+        let loader = CachingResourceLoader(videoId: videoId, originalURL: url, token: token)
+        let avAsset = AVURLAsset(url: cachingURL)
+        avAsset.resourceLoader.setDelegate(loader, queue: loader.loaderQueue)
+        self.cachingResourceLoader = loader
+        return avAsset
+    }
+
+    /// Returns `url` rewritten onto the local auth proxy, starting the proxy
+    /// on first use. The proxy adds the `Authorization` header, so AVFoundation
+    /// needs no custom request headers (there is no public API for them).
+    /// `forAirPlay` returns a local-network address the receiver can reach
+    /// instead of loopback.
+    private func proxiedURL(for url: URL, token: String, forAirPlay: Bool) async -> URL? {
+        let proxy: AuthProxy
+        if let existing = authProxy {
+            proxy = existing
+        } else {
+            guard let baseURL = authState.baseURL else { return nil }
+            let newProxy = AuthProxy(token: token, serverBaseURL: baseURL)
+            do {
+                try await newProxy.start()
+            } catch {
+                logger.error("AuthProxy failed to start: \(error.localizedDescription)")
+                return nil
+            }
+            // Another caller may have installed a proxy while this one started.
+            if let existing = authProxy {
+                await newProxy.stop()
+                proxy = existing
+            } else {
+                authProxy = newProxy
+                proxy = newProxy
+            }
         }
-        if let cachingURL = CachingResourceLoader.cachingURL(from: url) {
-            snapshotPlaybackContext(url: url, token: token, isDirectAsset: false)
-            let loader = CachingResourceLoader(videoId: videoId, originalURL: url, token: token)
-            let avAsset = AVURLAsset(url: cachingURL)
-            avAsset.resourceLoader.setDelegate(loader, queue: loader.loaderQueue)
-            self.cachingResourceLoader = loader
-            return avAsset
+        if forAirPlay {
+            return await proxy.networkURL(for: url)
         }
-        // cachingURL conversion failed — fall back to direct-streaming asset
-        // with the same auth options the AirPlay path uses. Atomically set
-        // the direct-asset bit alongside the URL/token snapshot.
-        snapshotPlaybackContext(url: url, token: token, isDirectAsset: true)
-        return AVURLAsset(
-            url: url,
-            options: ["AVURLAssetHTTPHeaderFieldsKey": ["Authorization": "Token \(token)"]]
-        )
+        return await proxy.proxyURL(for: url)
+    }
+
+    private func stopAuthProxy() {
+        guard let proxy = authProxy else { return }
+        authProxy = nil
+        Task { await proxy.stop() }
     }
 
     /// Registers time + timeControlStatus observers scoped to the player
@@ -957,15 +1011,26 @@ final class VideoDetailViewModel {
         startNowPlayingController(for: player, video: video)
     }
 
-    /// Swap the current asset for a direct-auth asset when AirPlay becomes
-    /// active — receivers cannot resolve the custom `itacache://` scheme, and
-    /// Apple does not allow passing Authorization headers with AirPlay.
+    /// Swap the current asset for one the AirPlay receiver can fetch when
+    /// AirPlay becomes active mid-playback. Receivers cannot resolve the
+    /// custom `itacache://` scheme and never see request headers, so they get
+    /// a local-network URL on the auth proxy, which adds the token for them.
     private func handleAirPlayBecameActive() {
-        let alreadyDirect = progressStateLock.withLock { self.isUsingDirectAsset }
-        guard !alreadyDirect,
+        guard !isAirPlayAssetActive,
               let player, let video,
               let url = URL(string: video.mediaUrl),
               let token = authState.token else { return }
+        Task { await switchToAirPlayAsset(player: player, video: video, url: url, token: token) }
+    }
+
+    private func switchToAirPlayAsset(player: AVPlayer, video: Video, url: URL, token: String) async {
+        guard let proxied = await proxiedURL(for: url, token: token, forAirPlay: true) else {
+            logger.error("AirPlay active but no local-network address for the auth proxy; keeping local playback")
+            return
+        }
+        // Playback may have stopped, or a second route change may already
+        // have swapped the item, while the proxy was starting.
+        guard self.player === player, !isAirPlayAssetActive else { return }
 
         let currentTime = player.currentTime()
 
@@ -973,23 +1038,19 @@ final class VideoDetailViewModel {
         // calling `replaceCurrentItem`. The fused snapshot guarantees that a
         // concurrent 1Hz observer tick on `progressQueue` cannot observe
         // partial state — either it sees the OLD asset's context (no reseed
-        // races) or the NEW direct-asset context (Step 0 bypass fires). The
-        // previous "snapshot URL/token, then several lines later flip the
-        // bit" sequence left an ~11-line window where the bypass flag was
-        // stale (still `false`) but the URL/token already pointed at the
-        // direct-streaming URL — a tick landing in that window would dispatch
-        // `reseedMain` with the direct asset's auth context, downloading
-        // bytes AVPlayer would never read.
+        // races) or the NEW direct-asset context (Step 0 bypass fires). A
+        // tick seeing the new URL/token with a stale `false` bit would
+        // dispatch `reseedMain` and download bytes AVPlayer never reads.
         snapshotPlaybackContext(url: url, token: token, isDirectAsset: true)
+        isAirPlayAssetActive = true
 
-        let asset = AVURLAsset(
-            url: url,
-            options: ["AVURLAssetHTTPHeaderFieldsKey": ["Authorization": "Token \(token)"]]
-        )
+        let asset = AVURLAsset(url: proxied)
         let item = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: [.tracks, .duration])
         player.replaceCurrentItem(with: item)
         recordSeek("[Seek] reason=airplaySwap to=\(String(format: "%.2f", currentTime.seconds))s")
-        player.seek(to: currentTime, toleranceBefore: .zero, toleranceAfter: .zero)
+        // Completion-handler form: in this async context the plain call
+        // resolves to the async overload, and the swap must not suspend here.
+        player.seek(to: currentTime, toleranceBefore: .zero, toleranceAfter: .zero) { _ in }
         cachingResourceLoader = nil
 
         // Re-register every per-item observer on the replacement item. The
@@ -999,7 +1060,7 @@ final class VideoDetailViewModel {
         // duplicate KVO registration — see its docstring for the rationale.
         registerItemObservers(item, videoId: video.youtubeId, duration: Double(video.duration))
 
-        logger.notice("AirPlay active: switched to direct streaming")
+        logger.notice("AirPlay active: switched to auth-proxy streaming")
     }
 
     private func observeFailedToPlayToEnd(_ item: AVPlayerItem) {
@@ -1396,21 +1457,8 @@ final class VideoDetailViewModel {
         guard let video,
               let url = URL(string: video.mediaUrl),
               let token = authState.token,
-              let baseURL = authState.baseURL else { return }
+              let proxyURL = await proxiedURL(for: url, token: token, forAirPlay: false) else { return }
 
-        let proxy = AuthProxy(token: token, serverBaseURL: baseURL)
-        do {
-            try await proxy.start()
-        } catch {
-            return
-        }
-
-        guard let proxyURL = await proxy.proxyURL(for: url) else {
-            await proxy.stop()
-            return
-        }
-
-        self.authProxy = proxy
         self.vlcMediaURL = proxyURL
     }
 
@@ -1449,7 +1497,7 @@ final class VideoDetailViewModel {
         // in `evaluateReseedDispatch` cannot race).
         // Single call tears down every KVO + notification token registered
         // during startAVPlayback / observePlayerStatus / observeFailedToPlayToEnd
-        // / handleAirPlayBecameActive. Idempotent — deinit may also call it.
+        // / switchToAirPlayAsset. Idempotent — deinit may also call it.
         observerBag.tearDown()
         // Stop AVPlayer
         if let player {
@@ -1486,7 +1534,7 @@ final class VideoDetailViewModel {
             // wrapper so the contract is unit-testable without needing to
             // wire a real `AVPlayer` into a VM SUT.
             lastExplicitSeekAt = Self.resetExplicitSeekTimestamp()
-            // Clear the snapshot taken by `configureAsset` so the 1Hz reseed
+            // Clear the snapshot taken at asset construction so the 1Hz reseed
             // trigger's nil-guard short-circuits after teardown. Intentionally
             // do NOT reset `lastReseedAt` / `lastReseedTargetByte` — they're
             // stateless across stops and a stale 2s debounce window is
@@ -1517,11 +1565,10 @@ final class VideoDetailViewModel {
             }
             vlcMediaURL = nil
             lastVLCPosition = 0
-            if let proxy = authProxy {
-                authProxy = nil
-                Task { await proxy.stop() }
-            }
         }
+
+        isAirPlayAssetActive = false
+        stopAuthProxy()
     }
 
     func loadVideo() async {
