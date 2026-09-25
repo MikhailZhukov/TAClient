@@ -33,6 +33,25 @@ private nonisolated let coverSoonWindow: Int64 = 8 * 1024 * 1024  // 8 MB
 private nonisolated let graceSleepMs: UInt64 = 200                // 200 ms between retries
 private nonisolated let maxGraceAttempts = 3                       // up to 600 ms total
 
+/// Process-wide loader counters for the `[Cache]` health line. Diagnostic:
+/// lets a device log show whether AVPlayer's memory growth tracks bytes the
+/// loader handed over (`sent`) and how many requests are open at once.
+nonisolated enum LoaderStats {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var active = 0
+    nonisolated(unsafe) private static var started = 0
+    nonisolated(unsafe) private static var sentBytes: Int64 = 0
+
+    static func begin() { lock.withLock { active += 1; started += 1 } }
+    static func end() { lock.withLock { active -= 1 } }
+    static func add(_ bytes: Int) { lock.withLock { sentBytes += Int64(bytes) } }
+
+    /// e.g. `active=2 started=41 sent=812MB`
+    static func summary() -> String {
+        lock.withLock { "active=\(active) started=\(started) sent=\(sentBytes / 1_048_576)MB" }
+    }
+}
+
 final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     nonisolated let videoId: String
     nonisolated let originalURL: URL
@@ -314,6 +333,18 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
         }
         guard let request else { return true }
 
+        LoaderStats.begin()
+        let sentAtStart = ContinuousClock.now
+        var sentBytes: Int64 = 0
+        var outcome = "cancelled"
+        logger.info("[Loader] open @\(request.offset) len=\(request.length) toEnd=\(request.toEnd)")
+        defer {
+            LoaderStats.end()
+            let ms = (ContinuousClock.now - sentAtStart).components.seconds * 1000
+                + (ContinuousClock.now - sentAtStart).components.attoseconds / 1_000_000_000_000_000
+            logger.info("[Loader] close @\(request.offset) sent=\(sentBytes / 1024)KB in \(ms)ms \(outcome)")
+        }
+
         // Clamp the request to the resource's real length. AVPlayer on iOS 27
         // issues open-ended `requestsAllDataToEndOfResource` requests (where
         // `requestedLength` is not the amount it wants) and ranges that run
@@ -340,7 +371,7 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
                 box.request.isCancelled ? nil : box.request.dataRequest?.currentOffset
             }) else { return false }
             let remaining = end - offset
-            if remaining <= 0 { return true }
+            if remaining <= 0 { outcome = "done"; return true }
 
             // Pace delivery (see `pacedDeliveryBytesPerSecond`). Sleeping is
             // cancellation-aware: AVPlayer cancelling the request once its
@@ -366,6 +397,7 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             ), !cachedData.isEmpty {
                 await respond(box, with: cachedData)
                 delivered += Int64(cachedData.count)
+                sentBytes = delivered
                 continue
             }
 
@@ -379,6 +411,7 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
                !graceData.isEmpty {
                 await respond(box, with: graceData)
                 delivered += Int64(graceData.count)
+                sentBytes = delivered
                 continue
             }
 
@@ -388,12 +421,15 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             case .data(let data):
                 await respond(box, with: data)
                 delivered += Int64(data.count)
+                sentBytes = delivered
             case .endOfResource:
+                outcome = "eof"
                 // The server says there is nothing at `offset` (416). The
                 // resource is shorter than we were told; everything that
                 // exists has been delivered, so finish instead of failing.
                 return true
             case .failed:
+                outcome = "failed"
                 return false
             }
         }
@@ -401,6 +437,7 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     }
 
     nonisolated private func respond(_ box: LoadingRequestBox, with data: Data) async {
+        LoaderStats.add(data.count)
         await onLoaderQueue {
             guard !box.request.isCancelled else { return }
             box.request.dataRequest?.respond(with: data)

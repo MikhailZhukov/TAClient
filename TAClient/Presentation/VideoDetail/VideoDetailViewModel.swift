@@ -1277,7 +1277,7 @@ final class VideoDetailViewModel {
             level = "OK"
         }
 
-        logger.info("[Cache] \(level) pos=\(Int(playbackPosition))s ahead=\(String(format: "%.0f", effectiveAhead))s cached=\(cachePercent)% range=\(status.startOffset)-\(status.endOffset)/\(status.totalSize) rss=\(MemoryDiagnostics.residentMBString())")
+        logger.info("[Cache] \(level) pos=\(Int(playbackPosition))s ahead=\(String(format: "%.0f", effectiveAhead))s cached=\(cachePercent)% range=\(status.startOffset)-\(status.endOffset)/\(status.totalSize) rss=\(MemoryDiagnostics.residentMBString()) loader: \(LoaderStats.summary())")
     }
 
     // MARK: - AirPlay
