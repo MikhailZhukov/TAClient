@@ -98,4 +98,29 @@ import Foundation
         #expect(uti == "public.mpeg-4")
         #expect(uti != "public.movie")
     }
+
+    // MARK: - pacingDelay
+
+    private let mb: Int64 = 1024 * 1024
+
+    @Test func pacing_initialBurst_isImmediate() {
+        #expect(CachingResourceLoader.pacingDelay(deliveredBytes: 0, elapsedSeconds: 0) == 0)
+        #expect(CachingResourceLoader.pacingDelay(deliveredBytes: 15 * mb, elapsedSeconds: 0) == 0)
+    }
+
+    @Test func pacing_pastBurst_waits() {
+        let wait = CachingResourceLoader.pacingDelay(deliveredBytes: 28 * mb, elapsedSeconds: 0)
+        #expect(wait > 0)
+        #expect(wait <= 1.0)
+    }
+
+    @Test func pacing_allowanceGrowsWithTime() {
+        // 16 MB burst + 12 MB/s × 2 s = 40 MB allowed.
+        #expect(CachingResourceLoader.pacingDelay(deliveredBytes: 39 * mb, elapsedSeconds: 2) == 0)
+        #expect(CachingResourceLoader.pacingDelay(deliveredBytes: 41 * mb, elapsedSeconds: 2) > 0)
+    }
+
+    @Test func pacing_waitIsCappedAtOneSecond() {
+        #expect(CachingResourceLoader.pacingDelay(deliveredBytes: 1_000 * mb, elapsedSeconds: 0) == 1.0)
+    }
 }

@@ -9,6 +9,19 @@ private nonisolated let cachingScheme = "itacache"
 private nonisolated let maxCacheResponseSize = 16 * 1024 * 1024  // 16 MB max per cache read
 private nonisolated let maxNetworkResponseSize = 16 * 1024 * 1024 // 16 MB max per network fetch (data(for:) buffers entire response)
 
+// Delivery pacing. `respond(with:)` has no backpressure: AVFoundation keeps
+// every byte handed to it until it consumes or cancels the request. Served
+// from the in-memory cache, a single to-end request used to push hundreds of
+// MB in well under a second (AVPlayer then reports multi-Gbps
+// `observedBitrate`), and the copies piled up to 2–4 GB RSS on 4K AV1. Each
+// request now gets an instant burst (moov reads, seek start-up) and after
+// that no more than `pacedDeliveryBytesPerSecond`, which is several times
+// the peak bitrate of a 4K stream, so AVPlayer still fills its forward
+// buffer quickly and cancels before a large backlog builds up.
+private nonisolated let pacedInitialBurstBytes: Int64 = 16 * 1024 * 1024  // 16 MB
+private nonisolated let pacedDeliveryBytesPerSecond: Double = 12 * 1024 * 1024  // 12 MB/s ≈ 100 Mbps
+private nonisolated let pacedCacheChunkSize = 4 * 1024 * 1024  // 4 MB per cache read once pacing applies
+
 // MARK: - Task 11 / B4 — Request dedup constants
 //
 // When the resource loader gets a cache miss but the preloader is actively
@@ -320,6 +333,8 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
         // Loop: read up to 16 MB per iteration (cache first, then network fallback),
         // calling `respond(with:)` each time, until the clamped range is
         // satisfied or the task is cancelled.
+        let startedAt = ContinuousClock.now
+        var delivered: Int64 = 0
         while !Task.isCancelled {
             guard let offset = await onLoaderQueue({ () -> Int64? in
                 box.request.isCancelled ? nil : box.request.dataRequest?.currentOffset
@@ -327,14 +342,30 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             let remaining = end - offset
             if remaining <= 0 { return true }
 
+            // Pace delivery (see `pacedDeliveryBytesPerSecond`). Sleeping is
+            // cancellation-aware: AVPlayer cancelling the request once its
+            // buffer is full wakes us and ends the loop.
+            let elapsed = ContinuousClock.now - startedAt
+            let wait = Self.pacingDelay(
+                deliveredBytes: delivered,
+                elapsedSeconds: Double(elapsed.components.seconds)
+                    + Double(elapsed.components.attoseconds) / 1e18
+            )
+            if wait > 0 {
+                try? await Task.sleep(for: .seconds(wait))
+                continue
+            }
+
             // Try reading from cache first (sync, NSLock-guarded — no executor hop)
-            let cacheLength = Int(min(remaining, Int64(maxCacheResponseSize)))
+            let chunkCap = delivered < pacedInitialBurstBytes ? maxCacheResponseSize : pacedCacheChunkSize
+            let cacheLength = Int(min(remaining, Int64(chunkCap)))
             if let cachedData = store.readData(
                 videoId: videoId,
                 offset: offset,
                 length: cacheLength
             ), !cachedData.isEmpty {
                 await respond(box, with: cachedData)
+                delivered += Int64(cachedData.count)
                 continue
             }
 
@@ -347,6 +378,7 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             if let graceData = await waitForPreloaderData(offset: offset, length: cacheLength),
                !graceData.isEmpty {
                 await respond(box, with: graceData)
+                delivered += Int64(graceData.count)
                 continue
             }
 
@@ -355,6 +387,7 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             switch await fetchFromNetwork(offset: offset, length: networkLength) {
             case .data(let data):
                 await respond(box, with: data)
+                delivered += Int64(data.count)
             case .endOfResource:
                 // The server says there is nothing at `offset` (416). The
                 // resource is shorter than we were told; everything that
@@ -372,6 +405,18 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             guard !box.request.isCancelled else { return }
             box.request.dataRequest?.respond(with: data)
         }
+    }
+
+    /// Seconds to wait before delivering more bytes on one loading request,
+    /// or 0 when it is within budget: an instant `pacedInitialBurstBytes`,
+    /// then `pacedDeliveryBytesPerSecond`.
+    nonisolated static func pacingDelay(deliveredBytes: Int64, elapsedSeconds: Double) -> Double {
+        let allowance = Double(pacedInitialBurstBytes) + pacedDeliveryBytesPerSecond * max(elapsedSeconds, 0)
+        let excess = Double(deliveredBytes) - allowance
+        guard excess >= 0 else { return 0 }
+        // Wait until the budget covers what was delivered plus a little
+        // headroom, so we don't wake up for a few bytes at a time.
+        return min((excess / pacedDeliveryBytesPerSecond) + 0.05, 1.0)
     }
 
     /// Exclusive end offset a data request should be served up to, or `nil`
