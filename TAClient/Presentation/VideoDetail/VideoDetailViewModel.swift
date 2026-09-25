@@ -1048,7 +1048,9 @@ final class VideoDetailViewModel {
         let item = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: [.tracks, .duration])
         player.replaceCurrentItem(with: item)
         recordSeek("[Seek] reason=airplaySwap to=\(String(format: "%.2f", currentTime.seconds))s")
-        player.seek(to: currentTime, toleranceBefore: .zero, toleranceAfter: .zero)
+        // Completion-handler form: in this async context the plain call
+        // resolves to the async overload, and the swap must not suspend here.
+        player.seek(to: currentTime, toleranceBefore: .zero, toleranceAfter: .zero) { _ in }
         cachingResourceLoader = nil
 
         // Re-register every per-item observer on the replacement item. The
