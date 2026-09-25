@@ -8,6 +8,8 @@
 	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>TA Client streams videos to AirPlay devices on your local network.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Mikhail Zhukov. Licensed under Apache-2.0.</string>
 	<key>NSAppTransportSecurity</key>
