@@ -10,14 +10,14 @@ private nonisolated let maxCacheResponseSize = 16 * 1024 * 1024  // 16 MB max pe
 private nonisolated let maxNetworkResponseSize = 16 * 1024 * 1024 // 16 MB max per network fetch (data(for:) buffers entire response)
 
 // Delivery pacing. `respond(with:)` has no backpressure: AVFoundation keeps
-// every byte handed to it until it consumes or cancels the request. Served
-// from the in-memory cache, a single to-end request used to push hundreds of
-// MB in well under a second (AVPlayer then reports multi-Gbps
-// `observedBitrate`), and the copies piled up to 2–4 GB RSS on 4K AV1. Each
-// request now gets an instant burst (moov reads, seek start-up) and after
-// that no more than `pacedDeliveryBytesPerSecond`, which is several times
-// the peak bitrate of a 4K stream, so AVPlayer still fills its forward
-// buffer quickly and cancels before a large backlog builds up.
+// every byte handed to it until it consumes or cancels the request, and a
+// cache-served to-end request can otherwise push hundreds of MB in well under
+// a second. Each request gets an instant burst (moov reads, seek start-up)
+// and after that no more than `pacedDeliveryBytesPerSecond`, several times
+// the peak bitrate of a 4K stream, so AVPlayer still fills its forward buffer
+// quickly and cancels before a large backlog builds up. (The multi-GB
+// footprint seen on 4K AV1 is decoder memory outside the app's heap, not
+// loader data — device logs showed ~20 MB per request before cancel.)
 private nonisolated let pacedInitialBurstBytes: Int64 = 16 * 1024 * 1024  // 16 MB
 private nonisolated let pacedDeliveryBytesPerSecond: Double = 12 * 1024 * 1024  // 12 MB/s ≈ 100 Mbps
 private nonisolated let pacedCacheChunkSize = 4 * 1024 * 1024  // 4 MB per cache read once pacing applies
