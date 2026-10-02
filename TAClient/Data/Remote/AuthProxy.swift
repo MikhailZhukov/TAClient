@@ -2,6 +2,56 @@ import Foundation
 import Network
 import OSLog
 
+/// Shutdown flag plus the set of `NWConnection`s a listener has accepted.
+///
+/// `NWListener.cancel()` does not terminate connections that were already
+/// accepted, and `AuthProxy`'s per-request handler streams an upstream body
+/// with no timeout, so a proxy that is stopped while serving a client would
+/// otherwise keep streaming (and keep holding the user's token) for as long as
+/// the peer keeps the socket open. `shutdown()` flips the flag — which makes
+/// `newConnectionHandler` refuse further work — and cancels everything in
+/// flight, which in turn unwinds the streaming loop through its
+/// `contentProcessed` failure.
+///
+/// The tracker is kept out of the actor's isolation domain because
+/// `newConnectionHandler` and the connection's `receive` completion run on
+/// arbitrary Network.framework queues; every access goes through the lock.
+final class AcceptedConnections: @unchecked Sendable {
+    private let lock = NSLock()
+    private var connections: [ObjectIdentifier: NWConnection] = [:]
+    private(set) var isShutdown = false
+
+    init(isShutdown: Bool = false) {
+        self.isShutdown = isShutdown
+    }
+
+    func install(_ connection: NWConnection) {
+        lock.withLock {
+            guard !isShutdown else { return }
+            connections[ObjectIdentifier(connection)] = connection
+        }
+    }
+
+    func release(_ connection: NWConnection) {
+        lock.withLock { connections[ObjectIdentifier(connection)] = nil }
+    }
+
+    /// Refuse future connections and cancel the ones already accepted.
+    func shutdown() {
+        let pending = lock.withLock { () -> [NWConnection] in
+            isShutdown = true
+            let all = Array(connections.values)
+            connections.removeAll()
+            return all
+        }
+        for connection in pending { connection.cancel() }
+    }
+
+    var count: Int {
+        lock.withLock { connections.count }
+    }
+}
+
 /// Local HTTP proxy that adds the `Authorization: Token` header to requests
 /// for server media. Used wherever the player cannot attach the header itself:
 /// VLCKit (no custom headers), AVPlayer's direct-streaming fallback, and
@@ -24,6 +74,10 @@ actor AuthProxy {
     /// `NWListener.cancel()` is asynchronous, so that callback really can land
     /// after `stop()` has already returned.
     private var isStopped = false
+    /// Shutdown flag plus the set of connections accepted by the current
+    /// listener. `stop()` flips it and cancels everything still in flight, so
+    /// no per-request streaming task survives the proxy that authorised it.
+    private var acceptedConnections: AcceptedConnections?
 
     var localPort: UInt16 { port }
 
@@ -41,17 +95,35 @@ actor AuthProxy {
         #endif
         let listener = try NWListener(using: params, on: .any)
 
-        listener.newConnectionHandler = { [weak self] connection in
-            guard let self else { connection.cancel(); return }
+        // A restart re-enters `start()` after `restartListener()` shut the
+        // previous tracker down; inheriting that shutdown flag would make the
+        // freshly bound listener refuse every connection. A first `start()` on a
+        // proxy that was already stopped keeps the flag set, so its handler
+        // refuses connections until the (cancelled) bind resolves.
+        let accepted = AcceptedConnections(isShutdown: isStopped)
+        self.acceptedConnections = accepted
+
+        listener.newConnectionHandler = { [weak self, accepted] connection in
+            guard let self, !accepted.isShutdown else {
+                connection.cancel()
+                return
+            }
+            accepted.install(connection)
             connection.start(queue: .global(qos: .userInitiated))
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, error in
                 guard let data, error == nil else {
+                    accepted.release(connection)
                     connection.cancel()
                     return
                 }
-                Task { [weak self] in
-                    guard let self else { connection.cancel(); return }
+                Task { [weak self, accepted] in
+                    guard let self, !accepted.isShutdown else {
+                        accepted.release(connection)
+                        connection.cancel()
+                        return
+                    }
                     await self.processHTTPRequest(data, connection: connection)
+                    accepted.release(connection)
                 }
             }
         }
@@ -91,6 +163,7 @@ actor AuthProxy {
 
         guard !Task.isCancelled, assignedPort > 0 else {
             listener.stateUpdateHandler = nil
+            accepted.shutdown()
             listener.cancel()
             throw AppError.unknown(message: "AuthProxy failed to bind")
         }
@@ -137,6 +210,10 @@ actor AuthProxy {
     func restartListener() {
         guard !isStopped, listener != nil else { return }
         Self.logger.warning("Attempting restart...")
+        // The old listener's connections belong to a socket that is gone; drop
+        // them and let `start()` install a fresh tracker.
+        acceptedConnections?.shutdown()
+        acceptedConnections = nil
         listener = nil
         port = 0
         Task {
@@ -147,6 +224,14 @@ actor AuthProxy {
     func stop() {
         guard !isStopped else { return }
         isStopped = true
+        // Cancel in-flight request handlers before the listener. Each handler
+        // streams an upstream body into an `NWConnection` with
+        // `timeoutIntervalForRequest = 0`, so nothing else ends it: without this
+        // the task, its `StreamingSession`, its upstream URLSession and its
+        // 256 KB send buffer survive `stop()`, and on the AirPlay path a peer
+        // that simply never reads keeps them alive indefinitely.
+        acceptedConnections?.shutdown()
+        acceptedConnections = nil
         // `cancel()` is asynchronous, but the state handler clears itself on
         // `.cancelled`/`.failed`, so the listener stops holding `self` through
         // the capture list without waiting for the socket to close. The proxy
@@ -308,7 +393,7 @@ actor AuthProxy {
             }
 
             // Stream body — chunks arrive as Data from delegate, forward directly
-            let sendChunkSize = 256 * 1024
+            let sendChunkSize = Self.sendChunkSize
             var buffer = Data()
             for try await chunk in chunks {
                 buffer.append(chunk)
@@ -344,6 +429,11 @@ actor AuthProxy {
             Self.sendError(connection, code: 502)
         }
     }
+
+    /// Body bytes buffered/aggregated per `connection.send` while relaying an
+    /// upstream chunk. Exposed for tests that assert the buffer stays bounded
+    /// regardless of how the upstream delivers its bytes.
+    nonisolated static let sendChunkSize = 256 * 1024
 
     private nonisolated static func sendError(_ connection: NWConnection, code: Int) {
         let response = "HTTP/1.1 \(code) Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
