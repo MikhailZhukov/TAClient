@@ -92,6 +92,14 @@ final class StreamingSession: NSObject, URLSessionDataDelegate, @unchecked Senda
             } onCancel: {
                 task.cancel()
             }
+            // The consumer may be cancelled while the response is in flight, and
+            // `AsyncThrowingStream` does not fire `onTermination` on a stream that
+            // was never created or already finished — so the task would run to
+            // `timeoutIntervalForResource = 0` with nobody reading it, and the
+            // delegate-based session would never be invalidated.
+            dataStream.onTermination = { [weak task] _ in
+                task?.cancel()
+            }
             return (response, dataStream)
         } catch {
             // Two distinct exits here:

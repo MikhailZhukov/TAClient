@@ -198,6 +198,53 @@ extension DataLayerSuite {
         #expect(weakStreamer == nil, "StreamingSession leaked after the awaiting task was cancelled")
     }
 
+    /// The task that awaits the chunk loop is cancelled mid-body. Neither
+    /// `AsyncThrowingStream`'s `onTermination` (the stream is still alive, not
+    /// deallocated) nor `URLSessionTask` cancellation follows from cancelling a
+    /// Swift task, so this needed an explicit `onTermination` on the returned
+    /// stream.
+    @Test("session reclaimed when the consuming task is cancelled mid-body")
+    func sessionInvalidatedWhenConsumingTaskCancelledMidBody() async throws {
+        let chunks: [Data] = (0..<16).map { _ in Data(repeating: 0x77, count: 4096) }
+        MockURLProtocol.slowStreamHandler = { _ in
+            let response = HTTPURLResponse(
+                url: Self.mockURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, chunks, 0.1)
+        }
+
+        weak var weakStreamer: StreamingSession?
+        let iterations = SendableBox<Int>(0)
+        let task = Task {
+            let streamer = StreamingSession()
+            weakStreamer = streamer
+            let (_, stream) = try? await streamer.stream(
+                request: makeRequest(),
+                configuration: makeConfig()
+            )
+            guard let stream else { return }
+            do {
+                for try await _ in stream {
+                    iterations.set(iterations.current + 1)
+                }
+            } catch {
+                // Expected: cancellation.
+            }
+        }
+
+        try await Task.sleep(for: .milliseconds(250))
+        task.cancel()
+        await task.value
+
+        #expect(iterations.current >= 1, "the consumer should have started reading")
+        try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
+        #expect(weakStreamer == nil,
+                "StreamingSession leaked after the consuming task was cancelled mid-body")
+    }
+
     /// Genuine network-error branch: the mock throws `URLError`, so
     /// `didCompleteWithError(error)` runs the error path through
     /// `responseContinuation?.resume(throwing:)` and then invalidates the
