@@ -19,6 +19,11 @@ actor AuthProxy {
     private let token: String
     private let serverBaseURL: URL
     private let pathSecret = UUID().uuidString
+    /// Set by `stop()` so a late `.failed` callback from the listener being
+    /// torn down cannot resurrect the proxy through `restartListener()`.
+    /// `NWListener.cancel()` is asynchronous, so that callback really can land
+    /// after `stop()` has already returned.
+    private var isStopped = false
 
     var localPort: UInt16 { port }
 
@@ -51,32 +56,71 @@ actor AuthProxy {
             }
         }
 
-        let assignedPort: UInt16 = try await withCheckedThrowingContinuation { continuation in
-            listener.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    continuation.resume(returning: listener.port?.rawValue ?? 0)
-                case .failed(let error):
-                    continuation.resume(throwing: error)
-                default:
-                    break
-                }
+        let box = SendableBox<UInt16>(0)
+        let startingStateHandler: @Sendable (NWListenerState) -> Void = { [box] state in
+            switch state {
+            case .ready:
+                box.set(listener.port?.rawValue ?? 0)
+            case .failed(let error):
+                Self.logger.error("Listener failed while starting: \(error.localizedDescription)")
+            default:
+                break
             }
-            listener.start(queue: .global(qos: .userInitiated))
+        }
+        // Install before `start()`, then poll for `.ready` instead of parking a
+        // `CheckedContinuation` on it. The continuation form had no way to be
+        // handed back: a caller cancelled (or a timeout) while `start()` was
+        // suspended left a continuation that nothing could resume, and the
+        // state handler captured the continuation closure — which retains the
+        // listener — installed on that listener forever.
+        listener.stateUpdateHandler = startingStateHandler
+        listener.start(queue: .global(qos: .userInitiated))
+
+        let assignedPort: UInt16 = await withTaskCancellationHandler {
+            var port: UInt16 = box.current
+            while port == 0 && !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(20))
+                port = box.current
+            }
+            return port
+        } onCancel: {
+            // Nothing may keep the socket bound past a cancelled start.
+            listener.stateUpdateHandler = nil
+            listener.cancel()
         }
 
-        guard assignedPort > 0 else {
+        guard !Task.isCancelled, assignedPort > 0 else {
+            listener.stateUpdateHandler = nil
+            listener.cancel()
             throw AppError.unknown(message: "AuthProxy failed to bind")
         }
+        // A `stop()` that landed while `start()` was polling has already
+        // cancelled this listener; do not hand a dead socket back to the caller
+        // (and do not reinstall a state handler on it).
+        guard !isStopped else {
+            throw AppError.unknown(message: "AuthProxy stopped while starting")
+        }
 
-        // Monitor listener state after start
+        // Monitor listener state after start.
+        //
+        // This handler is the reason `AuthProxy` used to need a `deinit`: the
+        // closure is retained by the `NWListener`, and `NWListener.cancel()` is
+        // asynchronous — the framework keeps the listener (and therefore the
+        // handler, and therefore `self` through the capture list) alive until
+        // the socket is actually closed. Clearing it on every terminal state
+        // releases that edge explicitly instead of relying on ARC to do it
+        // after the fact.
         listener.stateUpdateHandler = { [weak self] state in
             switch state {
             case .failed(let error):
                 Self.logger.error("Listener failed: \(error.localizedDescription)")
+                // Release the listener reference held by this closure before
+                // hopping to the actor; `restartListener` installs a fresh one.
+                listener.stateUpdateHandler = nil
                 Task { await self?.restartListener() }
             case .cancelled:
                 Self.logger.info("Listener cancelled")
+                listener.stateUpdateHandler = nil
             default:
                 break
             }
@@ -86,17 +130,30 @@ actor AuthProxy {
         self.port = assignedPort
     }
 
-    private func restartListener() {
-        guard listener != nil else { return }
+    /// Rebind after a transport failure. A failed listener is already dead,
+    /// so there is nothing to cancel here — cancelling it used to route
+    /// through the same path as `stop()` and left the old listener's async
+    /// `.cancelled` callback racing the new one.
+    func restartListener() {
+        guard !isStopped, listener != nil else { return }
         Self.logger.warning("Attempting restart...")
-        listener?.cancel()
         listener = nil
+        port = 0
         Task {
-            try? await start()
+            try? await self.start()
         }
     }
 
     func stop() {
+        guard !isStopped else { return }
+        isStopped = true
+        // `cancel()` is asynchronous, but the state handler clears itself on
+        // `.cancelled`/`.failed`, so the listener stops holding `self` through
+        // the capture list without waiting for the socket to close. The proxy
+        // needs no `deinit` for the listener any more — and must not grow one,
+        // because dealloc used to be reachable only while Network.framework
+        // still held the listener, which is precisely the window in which the
+        // token inside it outlived `stop()`.
         listener?.cancel()
         listener = nil
         port = 0
