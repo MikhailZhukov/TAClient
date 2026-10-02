@@ -4,6 +4,7 @@ import Testing
 
 struct UserAccountDTOTests {
 
+    @MainActor
     @Test func jsonDecoding_fullResponse() throws {
         let json = """
         {
@@ -21,6 +22,7 @@ struct UserAccountDTOTests {
         #expect(dto.isStaff == true)
     }
 
+    @MainActor
     @Test func jsonDecoding_regularUser() throws {
         let json = """
         {
@@ -36,6 +38,7 @@ struct UserAccountDTOTests {
         #expect(dto.isStaff == false)
     }
 
+    @MainActor
     @Test func jsonDecoding_missingFields() throws {
         let json = """
         { "id": 1 }
@@ -129,6 +132,7 @@ extension DataLayerSuite {
         MockResponse.tearDown()
     }
 
+    @MainActor
     @Test func fetchUserAccount_superuser_setsPrivileges() async throws {
         let (client, authState) = MockResponse.makeAPIClient()
         let repo = AuthRepositoryImpl(apiClient: client, authState: authState)
@@ -148,6 +152,7 @@ extension DataLayerSuite {
         authState.handleUnauthorized()
     }
 
+    @MainActor
     @Test func fetchUserAccount_regularUser_notPrivileged() async throws {
         let (client, authState) = MockResponse.makeAPIClient()
         let repo = AuthRepositoryImpl(apiClient: client, authState: authState)
@@ -165,6 +170,7 @@ extension DataLayerSuite {
         authState.handleUnauthorized()
     }
 
+    @MainActor
     @Test func fetchUserAccount_missingFields_defaultsFalse() async throws {
         let (client, authState) = MockResponse.makeAPIClient()
         let repo = AuthRepositoryImpl(apiClient: client, authState: authState)

@@ -114,6 +114,272 @@ extension DataLayerSuite {
         #expect(weakStreamer == nil, "StreamingSession leaked after consumer cancellation: URLSession is still retaining its delegate")
     }
 
+    /// Regression for the pre-fix ordering bug: `onTermination` used to be
+    /// attached AFTER the response arrived, via `dataContinuation?`, so a tiny
+    /// response whose delegate reached `finish()` first left `dataContinuation`
+    /// nil and the assignment was a silent no-op — nothing ever cancelled the
+    /// task, `didCompleteWithError` never fired, and the delegate-based session
+    /// (which strongly retains this instance) leaked.
+    ///
+    /// The response body is delivered with a delay so the stream is guaranteed
+    /// to still be live at `stream()` return (otherwise the test would pass
+    /// vacuously on natural completion); the consumer then drops the stream
+    /// WITHOUT ever iterating it.
+    @Test("session reclaimed when consumer abandons stream before iterating")
+    func sessionInvalidatedWhenStreamAbandonedWithoutIterating() async throws {
+        let chunks: [Data] = (0..<8).map { _ in Data(repeating: 0x5A, count: 4096) }
+        MockURLProtocol.slowStreamHandler = { _ in
+            let response = HTTPURLResponse(
+                url: Self.mockURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, chunks, 0.1)
+        }
+
+        weak var weakStreamer: StreamingSession?
+        do {
+            let streamer = StreamingSession()
+            weakStreamer = streamer
+            let (response, _) = try await streamer.stream(
+                request: makeRequest(),
+                configuration: makeConfig()
+            )
+            // Response headers received, body still in flight. Dropping the
+            // stream here is what `break`ing out of the loop or an early `return`
+            // does: the `AsyncThrowingStream` deinitializes and fires
+            // `onTermination`.
+            #expect(response.statusCode == 200)
+        }
+
+        try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
+        #expect(weakStreamer == nil, "StreamingSession leaked when the stream was abandoned before iteration")
+    }
+
+    /// Same contract on the error path: the caller cancels the task that is
+    /// awaiting the response headers. Cancelling a Swift task does not cancel a
+    /// bare `URLSessionTask`, so `stream()` must do it itself (via
+    /// `withTaskCancellationHandler`) for the session to ever be invalidated.
+    @Test("session reclaimed when awaiting task is cancelled before response")
+    func sessionInvalidatedWhenAwaitCancelledBeforeResponse() async throws {
+        // Nothing reaches the client for 5 s, so the response-headers
+        // continuation is still suspended when we cancel.
+        MockURLProtocol.delayedHandler = { _ in
+            let response = HTTPURLResponse(
+                url: Self.mockURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data([0x01]), 5)
+        }
+
+        weak var weakStreamer: StreamingSession?
+        let task = Task { () -> Bool in
+            let streamer = StreamingSession()
+            weakStreamer = streamer
+            do {
+                _ = try await streamer.stream(
+                    request: makeRequest(),
+                    configuration: makeConfig()
+                )
+                return false  // never reached — we cancel below
+            } catch {
+                return true
+            }
+        }
+
+        try await Task.sleep(for: .milliseconds(200))
+        task.cancel()
+        // Bounded so an ignored cancellation fails the test instead of hanging the
+        // suite for the URLSession's 60 s request timeout.
+        let threw = await withTaskGroup(of: Bool?.self) { group in
+            // No `try`: the task's closure is non-throwing (it catches its own
+            // errors), so `Failure == Never` and `Task.value` does not throw here.
+            // The earlier `try?` was dead weight and the compiler said so. The `nil`
+            // in the group's element type is only ever produced by the sibling
+            // timeout task, which is what makes the race below decidable.
+            group.addTask { await task.value }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(10))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+        #expect(threw == true, "stream() should have thrown after cancellation")
+
+        try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
+        #expect(weakStreamer == nil, "StreamingSession leaked after the awaiting task was cancelled")
+    }
+
+    /// Exit 3 of `stream`'s cancellation contract: the consumer's *task* is
+    /// cancelled while suspended inside the chunk loop. `AsyncThrowingStream`
+    /// cannot observe this — the stream object stays alive, so its
+    /// `CancellationHandler` never fires — so the contract is that the call site
+    /// must reach for `cancelUpstream()`.
+    ///
+    /// This test pins the half that `StreamingSession` does owe: a consumer that
+    /// pairs task cancellation with `cancelUpstream()` (as `AuthProxy` and
+    /// `VideoDetailViewModel` do) is reclaimed. The `defer`-style pairing is the
+    /// documented mitigation, so it needs a test that exercises exactly it rather
+    /// than a bare `task.cancel()` that the class makes no promise about.
+    @Test("consuming task cancelled mid-body + cancelUpstream reclaims the session")
+    func consumingTaskCancelledMidBodyWithExplicitCancel() async throws {
+        let chunks: [Data] = (0..<16).map { _ in Data(repeating: 0x77, count: 4096) }
+        MockURLProtocol.slowStreamHandler = { _ in
+            let response = HTTPURLResponse(
+                url: Self.mockURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, chunks, 0.1)
+        }
+
+        weak var weakStreamer: StreamingSession?
+        let iterations = SendableBox<Int>(0)
+        let task = Task {
+            let streamer = StreamingSession()
+            weakStreamer = streamer
+            defer { streamer.cancelUpstream() }
+            // `try?` here would produce `Optional<(response, chunks)>` — a single
+            // optional TUPLE, which cannot be destructured into `(_, stream)`. Every
+            // other test in this file calls with `try await` and destructures the
+            // non-optional tuple; do the same and absorb a throw in the catch below
+            // (a stream-establishment failure is as valid an outcome here as a
+            // mid-body throw, and the assertion is about the weak reference).
+            let (_, stream) = try await streamer.stream(
+                request: makeRequest(),
+                configuration: makeConfig()
+            )
+            do {
+                for try await _ in stream {
+                    iterations.set(iterations.current + 1)
+                }
+            } catch {
+                // Expected: cancellation.
+            }
+        }
+
+        try await Task.sleep(for: .milliseconds(250))
+        task.cancel()
+        // The join that proves the consumer finished — and its
+        // `defer { cancelUpstream() }` ran — before the weak reference is checked.
+        // No `try`: this closure is non-throwing, so `Failure == Never`.
+        //
+        // The await itself is load-bearing and must not be "cleaned up": it is what
+        // orders the leak assertion below after the consumer's teardown.
+        _ = try? await task.value
+
+        #expect(iterations.current >= 1, "the consumer should have started reading")
+        try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
+        #expect(weakStreamer == nil,
+                "StreamingSession leaked after the consuming task was cancelled mid-body")
+    }
+
+    /// `cancelUpstream()` is what a relay uses when its *downstream* dies: no
+    /// amount of stream plumbing cancels a `URLSessionTask` for a consumer that
+    /// is still holding the stream alive, so the session must expose an explicit
+    /// off-consumer cancel. Also pins that the call is safe (and effective) when
+    /// made before `stream(...)` even exists.
+    @Test("cancelUpstream cancels an in-flight request without dropping the stream")
+    func cancelUpstreamCancelsInFlightRequest() async throws {
+        let chunks: [Data] = (0..<16).map { _ in Data(repeating: 0x31, count: 4096) }
+        MockURLProtocol.slowStreamHandler = { _ in
+            let response = HTTPURLResponse(
+                url: Self.mockURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, chunks, 0.1)
+        }
+
+        weak var weakStreamer: StreamingSession?
+        var receivedAfterCancel = 0
+        // Scoped so the session's only remaining strong reference after the block is
+        // URLSession's retain on its delegate — the leak this test is about. Swift
+        // keeps a local alive to the end of its lexical scope, so declaring the
+        // session at function scope makes `weakStreamer == nil` unachievable no matter
+        // what the product does. Every passing leak test in this file uses this
+        // `do {}` shape for exactly that reason; these two did not.
+        do {
+            let streamer = StreamingSession()
+            weakStreamer = streamer
+            let (_, stream) = try await streamer.stream(
+                request: makeRequest(),
+                configuration: makeConfig()
+            )
+            // Read exactly one chunk so the request is genuinely in flight, then
+            // cancel from "outside" while keeping `stream` alive.
+            var iterator = stream.makeAsyncIterator()
+            _ = try await iterator.next()
+
+            streamer.cancelUpstream()
+            streamer.cancelUpstream()  // idempotent
+
+            // The stream must terminate (with a cancellation error) rather than keep
+            // yielding the remaining ~1.5 s of chunks.
+            do {
+                while try await iterator.next() != nil {
+                    receivedAfterCancel += 1
+                }
+            } catch {
+                // Expected: URLError.cancelled.
+            }
+            // Keep a strong ref until here so "the stream was never dropped" is true.
+            withExtendedLifetime(stream) {}
+        }
+        #expect(receivedAfterCancel == 0,
+                "upstream kept delivering after cancelUpstream (\(receivedAfterCancel) extra chunks)")
+
+        try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
+        #expect(weakStreamer == nil, "StreamingSession leaked after cancelUpstream")
+    }
+
+    /// `cancelUpstream()` before the task exists must not be lost — a relay can
+    /// notice a dead peer while the request is still being set up.
+    @Test("cancelUpstream before stream takes effect on the next request")
+    func cancelUpstreamBeforeStreamIsRemembered() async throws {
+        let chunks: [Data] = (0..<16).map { _ in Data(repeating: 0x32, count: 4096) }
+        MockURLProtocol.slowStreamHandler = { _ in
+            let response = HTTPURLResponse(
+                url: Self.mockURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, chunks, 0.1)
+        }
+
+        weak var weakStreamer: StreamingSession?
+        // Scoped for the same reason as the test above: the session must be released
+        // by the end of the block so that URLSession's retain on its delegate is the
+        // only thing that could still be holding it.
+        do {
+            let streamer = StreamingSession()
+            weakStreamer = streamer
+            streamer.cancelUpstream()
+
+            do {
+                let (_, stream) = try await streamer.stream(
+                    request: makeRequest(),
+                    configuration: makeConfig()
+                )
+                // Already cancelled: at most the bytes already buffered, then an end.
+                for try await _ in stream {}
+            } catch {
+                // Expected: the pre-cancelled task fails immediately.
+            }
+        }
+
+        try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
+        #expect(weakStreamer == nil, "StreamingSession leaked after a pre-emptive cancelUpstream")
+    }
+
     /// Genuine network-error branch: the mock throws `URLError`, so
     /// `didCompleteWithError(error)` runs the error path through
     /// `responseContinuation?.resume(throwing:)` and then invalidates the

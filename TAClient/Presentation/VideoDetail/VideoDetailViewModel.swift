@@ -175,7 +175,18 @@ final class VideoDetailViewModel {
     /// `stopPlayback()` also calls `tearDown()` for the normal path.
     private let observerBag = ObserverBag()
     private let progressQueue = DispatchQueue(label: "ru.mzhukov.TAClient.player.progress", qos: .utility)
-    private var authProxy: AuthProxy?
+    private var authProxy: (any AuthProxyConsumeProtocol)?
+    /// Constructs the proxy used by `proxiedURL(for:token:forAirPlay:)`.
+    ///
+    /// Overridable test seam (`internal`, reachable only through
+    /// `@testable import TAClient`) so tests can substitute a fake proxy whose
+    /// bind is slow and observable — the only way to exercise the
+    /// abandon-mid-bind contract without a real `NWListener`. Production always
+    /// uses the default.
+    @ObservationIgnored
+    var proxyFactory: @MainActor (String, URL) -> any AuthProxyConsumeProtocol = { token, baseURL in
+        AuthProxy(token: token, serverBaseURL: baseURL)
+    }
     private var cachingResourceLoader: CachingResourceLoader?
     private var lastVLCPosition: Double = 0
     private var lastVLCProgressSave: Date = .distantPast
@@ -201,6 +212,65 @@ final class VideoDetailViewModel {
     /// `true` while the player item streams from the auth proxy's
     /// local-network URL, i.e. an AirPlay receiver can fetch it. MainActor only.
     private var isAirPlayAssetActive = false
+    /// Starting the proxy is async (`NWListener` bind) and can be in flight
+    /// while the user tears playback down. Sharing one task per pending bind,
+    /// plus a generation counter stamped at handoff, makes the whole
+    /// start/stop sequence deterministic:
+    ///
+    /// - `stopPlayback()` cancels the task and bumps `proxyGeneration`, so a
+    ///   proxy that finishes binding after playback went away is stopped by its
+    ///   own task instead of being installed into a slot the caller already
+    ///   cleared (the pre-fix behaviour: `stopAuthProxy()` stopped a proxy that
+    ///   was still in use, and the orphan bind left a listener bound with the
+    ///   user's token);
+    /// - the abandon signal is per-handoff (`pendingProxyAbandon`), because a
+    ///   task that completes successfully after `cancel()` is NOT reported as
+    ///   cancelled, so `Task.isCancelled` alone cannot be the guard;
+    /// - `proxyInstallGeneration` records which handoff a running task belongs
+    ///   to, so a task whose slot was taken over neither installs a proxy nor
+    ///   clears its successor's state.
+    ///
+    /// All of these are MainActor-only and `@ObservationIgnored` — private
+    /// lifecycle state, never read by the view.
+    @ObservationIgnored
+    private var bindTask: Task<(any AuthProxyConsumeProtocol)?, Never>?
+    /// The generation of the handoff that currently OWNS `authProxy`, or `nil` when
+    /// no handoff owns it (never started, or torn down).
+    ///
+    /// A separate field from `proxyInstallGeneration` on purpose. Ownership cannot be
+    /// inferred from `proxyInstallGeneration == myGeneration`, because that is also
+    /// true of a handoff that SUCCEEDED and returned its proxy to a live caller — the
+    /// success path and the abandoned-but-installed path are indistinguishable that
+    /// way, and treating them alike clears a proxy a player is actively using.
+    /// Ownership must therefore be *recorded* by whoever installs, and released by
+    /// whoever hands the proxy off (the caller, or `stopAuthProxy`).
+    @ObservationIgnored
+    private var proxyOwnerGeneration: UInt64?
+    /// The current bind task, erased to `Task<Void, Never>`.
+    ///
+    /// Exists because `Task` is not class-constrained: it cannot be passed as
+    /// `AnyObject`, cannot be compared with `===`, and cannot name a generic
+    /// `Success` across a `Void` boundary. So `AuthProxyLease.adopt()` takes no task
+    /// at all, and this box is what `stopAuthProxy()` joins before letting the lease
+    /// run its backstop — "has the bind task finished?" is the only question the
+    /// grace window needs answered.
+    @ObservationIgnored
+    private let bindTaskBox = SendableBox<Task<Void, Never>?>(nil)
+    @ObservationIgnored
+    private var proxyGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var proxyInstallGeneration: UInt64 = 0
+    /// The proxy handed to the teardown path, if any. Keeps the actor alive
+    /// until `stop()` completes and is the object `deinit` can still reach when
+    /// it cannot reach the ViewModel's MainActor state.
+    @ObservationIgnored
+    private var proxyTeardown: AuthProxyLease?
+    /// Abandon signal for the handoff currently in flight, if any. Set by
+    /// `startAuthProxy` at handoff and marked by `cancelProxyStart()`. Kept
+    /// separately from `bindTask` because a caller can be suspended inside
+    /// `startAuthProxy` before its task exists.
+    @ObservationIgnored
+    private var pendingProxyAbandon: SendableBox<Bool>?
     private var sessionCoordinator: PlayerSessionCoordinator?
     private var nowPlaying: NowPlayingController?
 
@@ -214,12 +284,33 @@ final class VideoDetailViewModel {
     }
 
     /// Safety net for abnormal teardown paths (e.g. VM released without
-    /// `stopPlayback()` being called). `observerBag.tearDown()` is nonisolated
-    /// and thread-safe, so deinit — which Swift 6 runs without implicit
-    /// MainActor isolation — can invoke it directly. The bag is idempotent,
-    /// so double tear-downs from `stopPlayback` + deinit are harmless.
+    /// `stopPlayback()` being called).
+    ///
+    /// Everything here must be reachable without a MainActor hop, because Swift 6
+    /// runs `deinit` without actor isolation: no `await`, no access to
+    /// `@MainActor` stored state. `observerBag.tearDown()` qualifies (its tokens
+    /// are held in a thread-safe bag, and it is idempotent, so double tear-downs
+    /// from `stopPlayback` + deinit are harmless). The proxy is the one resource
+    /// that does NOT qualify directly — `authProxy` is MainActor state and
+    /// `AuthProxy.stop()` is an actor call — which is exactly why the teardown
+    /// path is an `AuthProxyLease`: a `Sendable` object with lock-guarded state
+    /// that a `nonisolated` deinit can read and drain.
     deinit {
         observerBag.tearDown()
+        // Drain the proxy through the lease. `takeForExternalStop()` is
+        // lock-guarded on a `Sendable` object, so it is reachable from here where
+        // `authProxy` is not.
+        //
+        // Returns nil when a stop was already dispatched or completed, so a
+        // normal pop (view `onDisappear` -> `stopPlayback()`) makes this a no-op
+        // and never races the in-flight teardown. A non-nil return means nobody
+        // ever claimed the proxy, so the task below stops it. It retains only the
+        // proxy actor, never `self`, so it can finish after the ViewModel is gone.
+        if let orphan = proxyTeardown?.takeForExternalStop() {
+            Task { [weak orphan] in
+                await orphan?.stop()
+            }
+        }
     }
 
     var doubleTapToSeek: Bool { sponsorBlockSettings.doubleTapToSeek }
@@ -302,9 +393,13 @@ final class VideoDetailViewModel {
     /// local-network URL the receiver can fetch; the fallback gets loopback.
     private func startDirectAVPlayback(video: Video, url: URL, token: String, forAirPlay: Bool) async {
         let proxied = await proxiedURL(for: url, token: token, forAirPlay: forAirPlay)
-        // `stopPlayback()` may have run while the proxy was starting.
+        // `stopPlayback()` may have run while the proxy was starting. Abandon
+        // without `stopAuthProxy()`: if a concurrent playback already installed
+        // this proxy, that playback owns it, and stopping it here would kill a
+        // live player. An orphan bind is stopped by its own task (see
+        // `startAuthProxy`), so nothing leaks either way.
         guard isBuffering, player == nil else {
-            stopAuthProxy()
+            cancelProxyStart()
             return
         }
         if let proxied {
@@ -681,27 +776,16 @@ final class VideoDetailViewModel {
     /// needs no custom request headers (there is no public API for them).
     /// `forAirPlay` returns a local-network address the receiver can reach
     /// instead of loopback.
+    ///
     private func proxiedURL(for url: URL, token: String, forAirPlay: Bool) async -> URL? {
-        let proxy: AuthProxy
+        let proxy: any AuthProxyConsumeProtocol
         if let existing = authProxy {
             proxy = existing
         } else {
             guard let baseURL = authState.baseURL else { return nil }
-            let newProxy = AuthProxy(token: token, serverBaseURL: baseURL)
-            do {
-                try await newProxy.start()
-            } catch {
-                logger.error("AuthProxy failed to start: \(error.localizedDescription)")
-                return nil
-            }
-            // Another caller may have installed a proxy while this one started.
-            if let existing = authProxy {
-                await newProxy.stop()
-                proxy = existing
-            } else {
-                authProxy = newProxy
-                proxy = newProxy
-            }
+            let newProxy = proxyFactory(token, baseURL)
+            guard let started = await startAuthProxy(newProxy) else { return nil }
+            proxy = started
         }
         if forAirPlay {
             return await proxy.networkURL(for: url)
@@ -709,10 +793,244 @@ final class VideoDetailViewModel {
         return await proxy.proxyURL(for: url)
     }
 
+    /// Bind `proxy` and install it as the VM's proxy, or return `nil` if this
+    /// start was abandoned (playback stopped, superseded, or bind failure).
+    ///
+    /// The install decision runs inside the task, on the MainActor, after the
+    /// bind's suspension point, and is guarded by `proxyGeneration` (stamped at
+    /// handoff) plus a per-handoff abandon box. Two properties make the outcome
+    /// deterministic:
+    ///
+    /// - the post-bind guard inside the task is synchronous, so once it falls
+    ///   through the install is atomic with respect to `cancelProxyStart()` /
+    ///   `stopAuthProxy()` — both run on the MainActor and can no longer interleave
+    ///   before `authProxy = proxy`;
+    /// - the abandon box is per-handoff, so a concurrent caller that reuses the proxy
+    ///   while a bind is in flight cannot clear another handoff's signal (a shared
+    ///   flag could be reset by a sibling and silently un-abandon this one, leaving a
+    ///   bound socket nobody owns).
+    ///
+    /// Post-await slot bookkeeping keys off `proxyOwnerGeneration`, recorded by the
+    /// task when it installs — NOT off task identity, and NOT off
+    /// `proxyInstallGeneration == generation`:
+    ///
+    /// - `===` on a `Task` does not compile (not class-constrained), and
+    ///   `cancelProxyStart()` nils `bindTask` anyway, so an identity check would be
+    ///   false exactly on the abandoned-then-installed path that needs the cleanup;
+    /// - `proxyInstallGeneration == generation` is equally true of a handoff that
+    ///   SUCCEEDED and returned its proxy to a live caller, so acting on it there
+    ///   would clear a proxy a player is using. Ownership has to be recorded, not
+    ///   inferred.
+    private func startAuthProxy(_ proxy: any AuthProxyConsumeProtocol) async -> (any AuthProxyConsumeProtocol)? {
+        let generation = proxyGeneration
+        // Per-handoff abandon signal, marked by `cancelProxyStart()`.
+        let abandoned = SendableBox<Bool>(false)
+        pendingProxyAbandon = abandoned
+
+        let bind = Task { @MainActor [weak self] () -> (any AuthProxyConsumeProtocol)? in
+            guard let self else { return nil }
+            do {
+                try await proxy.start()
+            } catch {
+                // Covers bind failure *and* cancellation of this task. Either
+                // way nobody owns the proxy, so release it here rather than
+                // leaving a listener bound. `stop()` is idempotent and safe on
+                // a proxy whose bind never completed.
+                logger.error("AuthProxy failed to start: \(error.localizedDescription)")
+                await proxy.stop()
+                return nil
+            }
+            // Abandoned while binding? `Task.isCancelled` alone is not enough: a
+            // task that finishes successfully after `cancel()` does not report
+            // itself cancelled, so the explicit signal carries the intent.
+            if Task.isCancelled || abandoned.current {
+                await proxy.stop()
+                return nil
+            }
+            self.authProxy = proxy
+            self.proxyInstallGeneration = generation
+            self.proxyOwnerGeneration = generation
+            return proxy
+        }
+        bindTask = bind
+        // Erased twin: finishes strictly after `bind`, which is all the lease's
+        // adopted-backstop needs to observe. Cleared below once `bind` completes.
+        bindTaskBox.set(Task { [_bind = bind] in _ = await _bind.value })
+
+        let installed = await bind.value
+        // This task installed the proxy but is returning nil, i.e. it is handing
+        // ownership to nobody: the caller abandoned the start. Nothing else can stop
+        // this socket, so the slot is released here and the task stops the proxy
+        // itself (it already did so before returning nil; this is the case where the
+        // install won the race against the abandon check).
+        if installed == nil, proxyOwnerGeneration == generation {
+            authProxy = nil
+            proxyOwnerGeneration = nil
+            proxyInstallGeneration = 0
+        }
+        // Success: the caller now holds the proxy, so the VM stops tracking it as
+        // "owned by an in-flight bind". A later `stopAuthProxy` still finds it via
+        // `authProxy`.
+        if installed != nil, proxyOwnerGeneration == generation {
+            proxyOwnerGeneration = nil
+        }
+        // Release the bind slot. `cancelProxyStart()` already nils it on the
+        // abandoned path; this covers the normal completion path, and without it a
+        // FINISHED task stays parked in `bindTask` for the ViewModel's whole life.
+        //
+        // That staleness is not cosmetic. `pendingProxyStartForTests` reports
+        // `bindTask != nil`, so a completed handoff keeps claiming a bind is in
+        // flight; and `stopAuthProxy()` snapshots `let pending = bindTask` to decide
+        // whether a bind owns the socket it is about to stop — a stale non-nil
+        // `pending` there can hand ownership to a task that already finished, leaving
+        // an installed proxy stopped by nobody.
+        //
+        // Unconditional is correct here, and no completion check is needed or
+        // possible: `await bind.value` above has already returned, so this handoff's
+        // task is necessarily finished by the time control reaches this line.
+        //
+        // There is deliberately no guard on it, for three reasons established the hard
+        // way in this branch:
+        // - `Task` is not class-constrained, so `bindTask === bind` does not compile;
+        // - `Task` has no `isCompleted`/`isFinished` member (the `isFinished` elsewhere
+        //   in this file is `URLRequest`'s), so completion cannot be probed at all;
+        // - `cancelProxyStart()` nils `bindTask`, so any identity-shaped check would be
+        //   false exactly on the abandoned path that most needs the clear.
+        //
+        // A newer handoff cannot be clobbered: `startAuthProxy` runs on the MainActor,
+        // and between `await bind.value` returning and this line there is no
+        // suspension, so no other `startAuthProxy` can have installed its task in
+        // between. A successor can only begin after this method returns.
+        bindTask = nil
+        if pendingProxyAbandon === abandoned { pendingProxyAbandon = nil }
+        bindTaskBox.set(nil)
+        return installed
+    }
+
+    /// Abandon a pending proxy bind and invalidate the current generation, so a
+    /// bind that completes after this point stops itself instead of installing.
+    /// Does NOT stop an already-installed proxy — callers that own one use
+    /// `stopAuthProxy()`.
+    private func cancelProxyStart() {
+        proxyGeneration += 1
+        // Mark the in-flight handoff abandoned. This must happen even when
+        // `bindTask` is nil, because a caller may already be suspended
+        // inside `startAuthProxy` before its task is created.
+        pendingProxyAbandon?.set(true)
+        // Wake the binding task. Authoritative rejection is the post-bind guard
+        // above, because a task that completes after `cancel()` does not report
+        // itself cancelled.
+        bindTask?.cancel()
+        bindTask = nil
+    }
+
+    /// Tear the proxy down: abandon any pending bind, then stop the installed
+    /// proxy unless the bind that was pending at entry installed it during this
+    /// call's suspension — in which case that task owns the socket and stops it,
+    /// and stopping it here would give one socket two owners.
+    ///
+    /// The stop runs inside an `AuthProxyLease` rather than an unowned
+    /// `Task { await proxy.stop() }`, for two reasons:
+    ///
+    /// - an unowned teardown can be cancelled by nothing and can land after a
+    ///   successor installed a different proxy;
+    /// - `deinit` also reaches `stopPlayback()`, and it is `nonisolated` in
+    ///   Swift 6 — it can neither await nor touch MainActor state, so an
+    ///   unowned MainActor task was the only thing between a stopped player and a
+    ///   listener left bound with the user's token in it. A lease is an object,
+    ///   so `deinit` can ask it whether a stop was already claimed — which is
+    ///   exactly the distinction it cannot make from a bare task (see
+    ///   `AuthProxyLease.takeForExternalStop()`).
     private func stopAuthProxy() {
+        let pending = bindTask
+        // Snapshot BEFORE cancelling: `cancelProxyStart()` nils the slots, and the
+        // backstop target has to be the bind that was in flight at entry.
+        let adoptedTwin = bindTaskBox.current
+        cancelProxyStart()
         guard let proxy = authProxy else { return }
         authProxy = nil
-        Task { await proxy.stop() }
+        let lease = AuthProxyLease(proxy: proxy)
+        proxyTeardown = lease
+        // A bind that installed the proxy AND still owns it (i.e. it installed after
+        // this teardown's generation bump, so the teardown never released ownership)
+        // is the socket's owner and will stop it. The lease records the handoff and
+        // waits as a backstop; the twin it must not race is joined OUTSIDE the lease,
+        // because a `Task` has no identity to store (`adopt()` takes no parameter).
+        // Otherwise this teardown owns the proxy and stops it.
+        if pending != nil, let watchedBind = adoptedTwin, let owner = proxyOwnerGeneration,
+           owner == proxyGeneration {
+            proxyOwnerGeneration = nil
+            lease.adopt()
+            // Owner first, then the backstop: `awaitStopping()` would otherwise sit
+            // out the lease's grace window against a bind task that is still running.
+            //
+            // Bounded join, not `_ = await watchedBind.value`: this task holds a
+            // STRONG lease reference (a `Task` is not cancellable from the lease, so
+            // the lease cannot drop it), and a bind that never returns would pin the
+            // lease — and the actor still inside it — for the process lifetime. On
+            // timeout the lease's own backstop runs and releases the socket.
+            Task { [lease] in
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { _ = await watchedBind.value }
+                    group.addTask { try? await Task.sleep(for: .seconds(30)) }
+                    await group.next()
+                    group.cancelAll()
+                }
+                await lease.awaitStopping()
+            }
+            return
+        }
+        lease.startStopping()
+    }
+
+    /// The teardown lease, for asserting `deinit`/`stopPlayback` handoff.
+    var proxyLeaseForTests: AuthProxyLease? {
+        proxyTeardown
+    }
+
+    // MARK: - Proxy lifecycle test seams
+    //
+    // `internal` (not `private`) purely so `@testable import TAClient` can drive
+    // the start/abandon/stop state machine with a fake proxy. Production paths
+    // call the private methods directly; these add no behaviour.
+
+    func startAuthProxyForTests(_ proxy: any AuthProxyConsumeProtocol) async -> (any AuthProxyConsumeProtocol)? {
+        await startAuthProxy(proxy)
+    }
+
+    /// `proxiedURL(for:token:forAirPlay:)` unchanged. Needed by the reuse test,
+    /// because reuse lives in that method's `if let existing = authProxy` guard and
+    /// cannot be exercised through `startAuthProxy` (which is the unconditional
+    /// bind-this-proxy primitive). Adds no behaviour and no parameter: the proxy the
+    /// test expects to be avoided is injected via the existing settable
+    /// `proxyFactory`, so a regression that consulted the factory is observable as a
+    /// factory call rather than needing a spare-proxy argument here.
+    func proxiedURLForTests(_ url: URL, token: String, forAirPlay: Bool) async -> URL? {
+        await proxiedURL(for: url, token: token, forAirPlay: forAirPlay)
+    }
+
+    func cancelProxyStartForTests() {
+        cancelProxyStart()
+    }
+
+    /// `stopAuthProxy()` plus a wait for the lease's stop to land, so the fake's
+    /// counters are deterministic without the caller guessing a sleep duration.
+    /// The production path stays fire-and-forget because `stopPlayback()` cannot
+    /// await.
+    func stopAuthProxyAwaitingForTests() async {
+        stopAuthProxy()
+        await proxyTeardown?.awaitStopping()
+        // Let the bind task finish clearing its own slot, so
+        // `pendingProxyStartForTests` reflects the settled state.
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+
+    var installedProxyForTests: (any AuthProxyConsumeProtocol)? {
+        authProxy
+    }
+
+    var pendingProxyStartForTests: Bool {
+        bindTask != nil
     }
 
     /// Registers time + timeControlStatus observers scoped to the player
