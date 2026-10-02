@@ -15,6 +15,13 @@ final class MockURLProtocol: URLProtocol {
     /// natural completion. Set to `nil` to disable. Cleared by `tearDown()`.
     nonisolated(unsafe) static var slowStreamHandler: ((URLRequest) throws -> (HTTPURLResponse, [Data], TimeInterval))?
 
+    /// Delayed single-shot handler: nothing is delivered to the client until
+    /// `delay` has elapsed, so a test can cancel the `URLSessionTask` (or the
+    /// awaiting Swift task) while the request is still genuinely in flight and
+    /// observe the failure path. Takes precedence over `slowStreamHandler` and
+    /// `requestHandler`. Cleared by `tearDown()`.
+    nonisolated(unsafe) static var delayedHandler: ((URLRequest) throws -> (HTTPURLResponse, Data, TimeInterval))?
+
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
@@ -30,6 +37,27 @@ final class MockURLProtocol: URLProtocol {
             Self.lastRequestBody = Self.readStream(stream)
         } else {
             Self.lastRequestBody = request.httpBody
+        }
+
+        if let delayed = Self.delayedHandler {
+            do {
+                let (response, data, delay) = try delayed(request)
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    guard let self else { return }
+                    let deadline = Date().addingTimeInterval(delay)
+                    while Date() < deadline {
+                        if self.stopped { return }
+                        Thread.sleep(forTimeInterval: 0.01)
+                    }
+                    if self.stopped { return }
+                    self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                    self.client?.urlProtocol(self, didLoad: data)
+                    self.client?.urlProtocolDidFinishLoading(self)
+                }
+            } catch {
+                client?.urlProtocol(self, didFailWithError: error)
+            }
+            return
         }
 
         if let slowHandler = Self.slowStreamHandler {
@@ -155,6 +183,7 @@ enum MockResponse {
     static func tearDown() {
         MockURLProtocol.requestHandler = nil
         MockURLProtocol.slowStreamHandler = nil
+        MockURLProtocol.delayedHandler = nil
         MockURLProtocol.lastRequest = nil
         MockURLProtocol.lastRequestBody = nil
     }

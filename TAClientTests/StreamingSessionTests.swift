@@ -114,6 +114,90 @@ extension DataLayerSuite {
         #expect(weakStreamer == nil, "StreamingSession leaked after consumer cancellation: URLSession is still retaining its delegate")
     }
 
+    /// Regression for the pre-fix ordering bug: `onTermination` used to be
+    /// attached AFTER the response arrived, via `dataContinuation?`, so a tiny
+    /// response whose delegate reached `finish()` first left `dataContinuation`
+    /// nil and the assignment was a silent no-op — nothing ever cancelled the
+    /// task, `didCompleteWithError` never fired, and the delegate-based session
+    /// (which strongly retains this instance) leaked.
+    ///
+    /// The response body is delivered with a delay so the stream is guaranteed
+    /// to still be live at `stream()` return (otherwise the test would pass
+    /// vacuously on natural completion); the consumer then drops the stream
+    /// WITHOUT ever iterating it.
+    @Test("session reclaimed when consumer abandons stream before iterating")
+    func sessionInvalidatedWhenStreamAbandonedWithoutIterating() async throws {
+        let chunks: [Data] = (0..<8).map { _ in Data(repeating: 0x5A, count: 4096) }
+        MockURLProtocol.slowStreamHandler = { _ in
+            let response = HTTPURLResponse(
+                url: Self.mockURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, chunks, 0.1)
+        }
+
+        weak var weakStreamer: StreamingSession?
+        do {
+            let streamer = StreamingSession()
+            weakStreamer = streamer
+            let (response, _) = try await streamer.stream(
+                request: makeRequest(),
+                configuration: makeConfig()
+            )
+            // Response headers received, body still in flight. Dropping the
+            // stream here is what `break`ing out of the loop or an early `return`
+            // does: the `AsyncThrowingStream` deinitializes and fires
+            // `onTermination`.
+            #expect(response.statusCode == 200)
+        }
+
+        try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
+        #expect(weakStreamer == nil, "StreamingSession leaked when the stream was abandoned before iteration")
+    }
+
+    /// Same contract on the error path: the caller cancels the task that is
+    /// awaiting the response headers. Cancelling a Swift task does not cancel a
+    /// bare `URLSessionTask`, so `stream()` must do it itself (via
+    /// `withTaskCancellationHandler`) for the session to ever be invalidated.
+    @Test("session reclaimed when awaiting task is cancelled before response")
+    func sessionInvalidatedWhenAwaitCancelledBeforeResponse() async throws {
+        // Nothing reaches the client for 5 s, so the response-headers
+        // continuation is still suspended when we cancel.
+        MockURLProtocol.delayedHandler = { _ in
+            let response = HTTPURLResponse(
+                url: Self.mockURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data([0x01]), 5)
+        }
+
+        weak var weakStreamer: StreamingSession?
+        let task = Task { () -> Bool in
+            let streamer = StreamingSession()
+            weakStreamer = streamer
+            do {
+                _ = try await streamer.stream(
+                    request: makeRequest(),
+                    configuration: makeConfig()
+                )
+                return false  // never reached — we cancel below
+            } catch {
+                return true
+            }
+        }
+
+        try await Task.sleep(for: .milliseconds(200))
+        task.cancel()
+        #expect(await task.value, "stream() should have thrown after cancellation")
+
+        try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
+        #expect(weakStreamer == nil, "StreamingSession leaked after the awaiting task was cancelled")
+    }
+
     /// Genuine network-error branch: the mock throws `URLError`, so
     /// `didCompleteWithError(error)` runs the error path through
     /// `responseContinuation?.resume(throwing:)` and then invalidates the
