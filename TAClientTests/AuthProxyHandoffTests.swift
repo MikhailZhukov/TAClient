@@ -200,6 +200,7 @@ struct AuthProxyHandoffTests {
         await vm.stopAuthProxyAwaitingForTests()
         #expect(await first.stopCount == 1)
         #expect(vm.installedProxyForTests == nil)
+        #expect(vm.proxyLeaseForTests?.state == .stopped)
     }
 
     // MARK: - Superseded handoff

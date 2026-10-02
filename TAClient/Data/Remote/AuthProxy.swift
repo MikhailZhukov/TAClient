@@ -515,3 +515,150 @@ protocol AuthProxyConsumeProtocol: Actor {
     func proxyURL(for originalURL: URL) -> URL?
     func networkURL(for originalURL: URL) -> URL?
 }
+
+/// Owns a proxy on its way out and guarantees `stop()` runs exactly once,
+/// without the caller having to `await`.
+///
+/// `AuthProxy` is an actor, so `stop()` is asynchronous — and the teardown paths
+/// that need it are the ones that cannot await: `VideoDetailViewModel.stopPlayback()`
+/// is synchronous and is also reached from a `nonisolated` `deinit`, where there
+/// is no way to touch MainActor state or suspend. An unowned
+/// `Task { await proxy.stop() }` was the whole gap: nothing could cancel it, it
+/// could land after a successor installed a different proxy, and when `deinit`
+/// released the ViewModel there was no guarantee it ran at all — leaving the
+/// `NWListener` bound with the user's token inside it for the life of the process.
+///
+/// The lease closes that gap by making the pending stop an *object* the owner can
+/// see (`hasPendingTeardown`) and hand to whoever can finish it.
+final class AuthProxyLease: @unchecked Sendable {
+    enum State: Sendable {
+        /// Created, not yet stopping. A `deinit` that finds the lease in this
+        /// state takes it over.
+        case pending
+        /// `stop()` has been dispatched. Nobody else needs to do anything.
+        case stopping
+        /// `stop()` completed.
+        case stopped
+        /// The proxy was handed to a bind task that owns the socket; the lease
+        /// stops it only if that task ends without doing so.
+        case adopted(Task<Void, Never>)
+    }
+
+    private let lock = NSLock()
+    private var _state: State = .pending
+    nonisolated(unsafe) private var proxy: (any AuthProxyConsumeProtocol)?
+    nonisolated(unsafe) private var stopTask: Task<Void, Never>?
+
+    init(proxy: any AuthProxyConsumeProtocol) {
+        self.proxy = proxy
+    }
+
+    var state: State {
+        lock.withLock { _state }
+    }
+
+    /// `true` while a stop has been dispatched but not confirmed.
+    var isStoppingOrStopped: Bool {
+        lock.withLock {
+            if case .pending = _state { return false }
+            return true
+        }
+    }
+
+    /// Dispatch `stop()` unless someone already has. Idempotent.
+    ///
+    /// The work runs in a task stored on the lease, not a floating one, so
+    /// `awaitStopping()` (tests) and any future coordinator can join it instead
+    /// of polling a counter or guessing a sleep.
+    @discardableResult
+    func startStopping() -> Task<Void, Never>? {
+        let claim: (proxy: any AuthProxyConsumeProtocol, task: Task<Void, Never>)? = lock.withLock {
+            guard case .pending = _state else { return nil }
+            // Reserve the slot with a placeholder; replaced below with the real
+            // task before anyone can observe `.stopping` and await it.
+            let placeholder = Task<Void, Never> {}
+            _state = .stopping
+            stopTask = placeholder
+            return (proxy, placeholder)
+        }
+        guard let claim else { return nil }
+        let task = Task { [weak self] in
+            await claim.proxy.stop()
+            self?.markStopped()
+        }
+        lock.withLock { if case .stopping = _state { stopTask = task } }
+        return task
+    }
+
+    /// Hand the socket to a bind task that will stop it after its own
+    /// suspension. The lease stays as a backstop: if that task ends without
+    /// stopping (it returned a proxy somebody else adopted, or was cancelled
+    /// between the install decision and the stop), the lease finishes the job.
+    func adopt(installedBy task: Task<Void, Never>) {
+        let adopted: Task<Void, Never>? = lock.withLock {
+            guard case .pending = _state else { return nil }
+            _state = .adopted(task)
+            return task
+        }
+        guard let adopted else { return }
+        let watcher = Task { [weak self] in
+            _ = await adopted.value
+            // Give the owning task's own `stop()` a chance to land on the actor
+            // first, so a normal handoff does not queue a redundant stop.
+            try? await Task.sleep(for: .milliseconds(100))
+            self?.startStopping()
+        }
+        lock.withLock { if case .adopted = _state { stopTask = watcher } }
+    }
+
+    /// Take the lease away from its owner so a `deinit` can finish the stop
+    /// itself. Returns `nil` when the stop is already dispatched or completed —
+    /// i.e. when there is nothing left for a taker to do.
+    ///
+    /// Also drops the lease's reference to the proxy actor: if the lease itself
+    /// is the last thing holding the ViewModel alive through a retained closure,
+    /// a strong proxy reference here would keep the socket's owner alive too, and
+    /// `stop()` would be reachable only through the returned value.
+    func takeForExternalStop() -> (any AuthProxyConsumeProtocol)? {
+        lock.withLock {
+            guard case .pending = _state else {
+                proxy = nil
+                return nil
+            }
+            let taken = proxy
+            proxy = nil
+            _state = .stopping
+            return taken
+        }
+    }
+
+    /// Await the dispatched stop, if one is in flight. For tests and for any
+    /// caller that must not proceed until the socket is actually released.
+    func awaitStopping() async {
+        let task = lock.withLock { stopTask }
+        await task?.value
+    }
+
+    private func markStopped() {
+        lock.withLock {
+            if case .stopping = _state { _state = .stopped }
+            proxy = nil
+        }
+    }
+}
+
+extension AuthProxyLease {
+    /// Nonisolated view of the pending stop, for `deinit` and for tests.
+    ///
+    /// `VideoDetailViewModel.deinit` runs without actor isolation and therefore
+    /// cannot read `authProxy`. It can read this, because the lease is
+    /// `Sendable` and its state sits behind an `NSLock` — the same pattern the
+    /// codebase already uses for lock-guarded `nonisolated(unsafe)` state that
+    /// crosses the MainActor boundary.
+    var hasPendingTeardown: Bool {
+        lock.withLock {
+            if case .pending = _state { return proxy != nil }
+            return false
+        }
+    }
+}

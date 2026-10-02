@@ -223,23 +223,26 @@ final class VideoDetailViewModel {
     ///   cleared (the pre-fix behaviour: `stopAuthProxy()` stopped a proxy that
     ///   was still in use, and the orphan bind left a listener bound with the
     ///   user's token);
-    /// - `proxyStartCancelled` carries the abandon intent explicitly, because a
+    /// - the abandon signal is per-handoff (`pendingProxyAbandon`), because a
     ///   task that completes successfully after `cancel()` is NOT reported as
-    ///   cancelled — `Task.isCancelled` alone cannot be the guard;
+    ///   cancelled, so `Task.isCancelled` alone cannot be the guard;
     /// - `proxyInstallGeneration` records which handoff a running task belongs
     ///   to, so a task whose slot was taken over neither installs a proxy nor
     ///   clears its successor's state.
     ///
-    /// All four fields are MainActor-only and `@ObservationIgnored` — private
+    /// All of these are MainActor-only and `@ObservationIgnored` — private
     /// lifecycle state, never read by the view.
     @ObservationIgnored
     private var authProxyTask: Task<(any AuthProxyConsumeProtocol)?, Never>?
     @ObservationIgnored
-    private var proxyStartCancelled = false
-    @ObservationIgnored
     private var proxyGeneration: UInt64 = 0
     @ObservationIgnored
     private var proxyInstallGeneration: UInt64 = 0
+    /// The proxy handed to the teardown path, if any. Keeps the actor alive
+    /// until `stop()` completes and is the object `deinit` can still reach when
+    /// it cannot reach the ViewModel's MainActor state.
+    @ObservationIgnored
+    private var proxyTeardown: AuthProxyLease?
     /// Abandon signal for the handoff currently in flight, if any. Set by
     /// `startAuthProxy` at handoff and marked by `cancelProxyStart()`. Kept
     /// separately from `authProxyTask` because a caller can be suspended inside
@@ -265,6 +268,24 @@ final class VideoDetailViewModel {
     /// so double tear-downs from `stopPlayback` + deinit are harmless.
     deinit {
         observerBag.tearDown()
+        // Safety net for teardown that never ran. `deinit` is `nonisolated` in
+        // Swift 6: it cannot await, and it cannot read `authProxy` (MainActor
+        // state). It CAN read `proxyTeardown` through `AuthProxyLease.takeFor
+        // ExternalStop()`, which is a lock-guarded, nonisolated operation on a
+        // Sendable object — that is the whole reason the teardown path is a lease
+        // rather than a bare `Task`.
+        //
+        // Returns nil when a stop was already dispatched or completed, so a
+        // normal pop (view `onDisappear` -> `stopPlayback()`) makes this a no-op
+        // and never races the in-flight teardown. A non-nil return means nobody
+        // ever claimed the proxy, so the detached task below stops it. The task
+        // retains only the proxy actor, never `self`, so it can finish after the
+        // ViewModel is gone.
+        if let orphan = proxyTeardown?.takeForExternalStop() {
+            Task { [weak orphan] in
+                await orphan?.stop()
+            }
+        }
     }
 
     var doubleTapToSeek: Bool { sponsorBlockSettings.doubleTapToSeek }
@@ -827,16 +848,39 @@ final class VideoDetailViewModel {
     /// proxy unless the bind that was pending at entry installed it during this
     /// call's suspension — in which case that task owns the socket and stops it,
     /// and stopping it here would give one socket two owners.
+    ///
+    /// The stop runs inside an `AuthProxyLease` rather than an unowned
+    /// `Task { await proxy.stop() }`, for two reasons:
+    ///
+    /// - an unowned teardown can be cancelled by nothing and can land after a
+    ///   successor installed a different proxy;
+    /// - `deinit` also reaches `stopPlayback()`, and it is `nonisolated` in
+    ///   Swift 6 — it can neither await nor touch MainActor state, so an
+    ///   unowned MainActor task was the only thing between a stopped player and a
+    ///   listener left bound with the user's token in it. A lease is an object,
+    ///   so `deinit` can ask it whether a stop was already claimed — which is
+    ///   exactly the distinction it cannot make from a bare task (see
+    ///   `AuthProxyLease.takeForExternalStop()`).
     private func stopAuthProxy() {
         let pending = authProxyTask
         cancelProxyStart()
         guard let proxy = authProxy else { return }
         authProxy = nil
-        if let pending, proxyInstallGeneration == proxyGeneration,
-           (await pending.value) === proxy {
+        proxyTeardown = AuthProxyLease(proxy: proxy)
+        if let pending, proxyInstallGeneration == proxyGeneration {
+            // The install happened after this teardown's generation bump, so the
+            // starting task owns the socket. It stops it after its own
+            // suspension; `AuthProxyLease` follows the token, so if that task
+            // somehow does not, the lease still does.
+            proxyTeardown?.adopt(installedBy: pending)
             return
         }
-        Task { await proxy.stop() }
+        proxyTeardown?.startStopping()
+    }
+
+    /// The teardown lease, for asserting `deinit`/`stopPlayback` handoff.
+    var proxyLeaseForTests: AuthProxyLease? {
+        proxyTeardown
     }
 
     // MARK: - Proxy lifecycle test seams
@@ -853,19 +897,16 @@ final class VideoDetailViewModel {
         cancelProxyStart()
     }
 
-    /// Awaitable variant of `stopAuthProxy()` for tests: stops the installed
-    /// proxy inline instead of via a fire-and-forget Task, so the fake's stop
-    /// count is deterministic without a sleep.
+    /// `stopAuthProxy()` plus a wait for the lease's stop to land, so the fake's
+    /// counters are deterministic without the caller guessing a sleep duration.
+    /// The production path stays fire-and-forget because `stopPlayback()` cannot
+    /// await.
     func stopAuthProxyAwaitingForTests() async {
-        let pending = authProxyTask
-        cancelProxyStart()
-        guard let proxy = authProxy else { return }
-        authProxy = nil
-        if let pending, proxyInstallGeneration == proxyGeneration,
-           (await pending.value) === proxy {
-            return
-        }
-        await proxy.stop()
+        stopAuthProxy()
+        await proxyTeardown?.awaitStopping()
+        // Let the bind task finish clearing its own slot, so
+        // `pendingProxyStartForTests` reflects the settled state.
+        try? await Task.sleep(for: .milliseconds(20))
     }
 
     var installedProxyForTests: (any AuthProxyConsumeProtocol)? {
