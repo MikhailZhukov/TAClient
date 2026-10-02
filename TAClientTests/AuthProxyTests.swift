@@ -79,8 +79,7 @@ struct AuthProxyTests {
     /// accepted, and the per-request relay has no timeout, so `stop()` must
     /// cancel them itself or the relay task (and the token it forwards) keeps
     /// running after the proxy is gone.
-    @Test func stop_cancelsInFlightConnections()
-        async throws {
+    @Test func stop_cancelsInFlightConnections() async throws {
         let proxy = AuthProxy(token: "t", serverBaseURL: URL(string: "https://ta.example.com")!)
         try await proxy.start()
 
@@ -97,7 +96,10 @@ struct AuthProxyTests {
         await proxy.stop()
 
         #expect(tracker.isShutdown, "stop() must refuse connections accepted afterwards")
-        #expect(tracker.count == 0, "stop() must clear the tracker")
+        // The connection leaves the tracker when the framework reports it
+        // terminal (see the poll below), not when `stop()` returns.
+        #expect(tracker.count == 0, "stop() must release the connection once it is terminal")
+        #expect(await proxy.acceptedConnectionsForTests == nil, "stop() must drop the tracker")
         // `NWConnection.cancel()` is async; poll briefly for the terminal state.
         var observed = connection.state
         for _ in 0..<100 where observed != .cancelled {
@@ -105,6 +107,30 @@ struct AuthProxyTests {
             observed = connection.state
         }
         #expect(observed == .cancelled, "stop() must cancel in-flight connections (state: \(observed))")
+    }
+
+    /// The tracker holds each peer strongly so `shutdown()` has something to
+    /// cancel, which means the tracker itself must stop holding connections the
+    /// framework already finished with — otherwise a proxy that outlives its
+    /// streams pins every peer until the next shutdown.
+    @Test func tracker_releasesConnectionsOnceTerminal() {
+        let tracker = AcceptedConnections()
+        let connection = NWConnection(host: "127.0.0.1", port: 1, using: .tcp)
+        // `install` arms a terminal-state handler, which retains the connection.
+        // Asserting the map entry alone would not catch a handler that keeps the
+        // connection alive after the entry is dropped.
+        #expect(tracker.install(connection))
+        #expect(tracker.count == 1)
+
+        tracker.release(connection)
+        #expect(tracker.count == 0)
+        // Releasing an untracked connection must not install anything or throw.
+        tracker.release(connection)
+        #expect(tracker.count == 0)
+
+        // A shut-down tracker refuses to track, so the caller can cancel.
+        tracker.shutdown()
+        #expect(!tracker.install(NWConnection(host: "127.0.0.1", port: 1, using: .tcp)))
     }
 
     /// The tracker lives in `newConnectionHandler`, outside the actor's
@@ -127,6 +153,25 @@ struct AuthProxyTests {
     @Test func acceptedConnections_inheritsShutdownState() {
         #expect(AcceptedConnections(isShutdown: true).isShutdown)
         #expect(!AcceptedConnections().isShutdown)
+    }
+
+    /// `AuthProxy.stop()` cancels the tracker and then drops its own reference,
+    /// so a second `shutdown()` from a late framework callback still has to reach
+    /// the connections rather than finding an emptied map.
+    @Test func acceptedConnections_shutdownIsIdempotentAndKeepsPendingTargets() {
+        let tracker = AcceptedConnections()
+        let connection = NWConnection(host: "127.0.0.1", port: 1, using: .tcp)
+        #expect(tracker.install(connection))
+
+        tracker.shutdown()
+        #expect(tracker.isShutdown)
+        // Still tracked until reported terminal: the cancel is in flight.
+        #expect(tracker.count == 1)
+        tracker.shutdown()
+        #expect(tracker.count == 1)
+
+        tracker.cancelAndRelease(connection)
+        #expect(tracker.count == 0)
     }
 
     // MARK: - Rebind guard
@@ -189,6 +234,10 @@ struct AuthProxyTests {
         await stopped.stop()
         try? await stopped.start()
         #expect(await stopped.acceptedConnectionsForTests?.isShutdown == true)
+
+        // A fresh proxy that was never stopped must NOT refuse its connections.
+        let fresh = AuthProxy(token: "t", serverBaseURL: URL(string: "https://ta.example.com")!)
+        #expect(await fresh.acceptedConnectionsForTests == nil, "no tracker before start()")
     }
 
     // MARK: - Request rejection

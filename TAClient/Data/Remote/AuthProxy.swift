@@ -25,11 +25,33 @@ final class AcceptedConnections: @unchecked Sendable {
         self.isShutdown = isShutdown
     }
 
-    func install(_ connection: NWConnection) {
-        lock.withLock {
-            guard !isShutdown else { return }
+    /// Track a newly accepted connection and arm its terminal-state handler.
+    ///
+    /// The handler is installed here rather than at construction so the
+    /// tracker→connection→handler cycle only exists while the tracker considers
+    /// the connection live: `cancelAndRelease` nils both the map entry and the
+    /// handler, which breaks the cycle and lets the connection go.
+    ///
+    /// Returns `false` when the tracker is already shut down — the caller must
+    /// refuse the connection in that case, because it was deliberately not
+    /// tracked and nothing else will cancel it.
+    func install(_ connection: NWConnection) -> Bool {
+        let tracked = lock.withLock { () -> Bool in
+            guard !isShutdown else { return false }
             connections[ObjectIdentifier(connection)] = connection
+            return true
         }
+        if tracked {
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .cancelled, .failed:
+                    cancelAndRelease(connection)
+                default:
+                    break
+                }
+            }
+        }
+        return tracked
     }
 
     func release(_ connection: NWConnection) {
@@ -37,14 +59,32 @@ final class AcceptedConnections: @unchecked Sendable {
     }
 
     /// Refuse future connections and cancel the ones already accepted.
+    ///
+    /// Does NOT clear the map: `NWConnection.cancel()` is asynchronous, and a
+    /// connection stays tracked until `cancelAndRelease` confirms it is
+    /// terminal. That keeps `shutdown()` idempotent — a second call (for example
+    /// the tracker's own `.stateUpdateHandler` firing `.cancelled` while the
+    /// first pass is still unwinding) re-cancels the same set instead of
+    /// silently doing nothing, which matters because `AuthProxy.stop()` clears
+    /// its own reference to the tracker immediately after the first call.
     func shutdown() {
         let pending = lock.withLock { () -> [NWConnection] in
             isShutdown = true
-            let all = Array(connections.values)
-            connections.removeAll()
-            return all
+            return Array(connections.values)
         }
         for connection in pending { connection.cancel() }
+    }
+
+    /// Drop a connection the framework reports as terminal, so a tracker that
+    /// outlives its proxy (Network.framework keeps the connection alive until
+    /// the close completes) does not pin dead peers indefinitely.
+    func cancelAndRelease(_ connection: NWConnection) {
+        let known = lock.withLock { () -> Bool in
+            guard connections[ObjectIdentifier(connection)] != nil else { return false }
+            connections[ObjectIdentifier(connection)] = nil
+            return true
+        }
+        if known { connection.cancel() }
     }
 
     var count: Int {
@@ -108,18 +148,19 @@ actor AuthProxy {
                 connection.cancel()
                 return
             }
-            accepted.install(connection)
+            guard accepted.install(connection) else {
+                connection.cancel()
+                return
+            }
             connection.start(queue: .global(qos: .userInitiated))
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, error in
                 guard let data, error == nil else {
-                    accepted.release(connection)
-                    connection.cancel()
+                    accepted.cancelAndRelease(connection)
                     return
                 }
                 Task { [weak self, accepted] in
                     guard let self, !accepted.isShutdown else {
-                        accepted.release(connection)
-                        connection.cancel()
+                        accepted.cancelAndRelease(connection)
                         return
                     }
                     await self.processHTTPRequest(data, connection: connection)
@@ -460,4 +501,17 @@ actor AuthProxy {
         default: nil
         }
     }
+}
+
+/// The surface `VideoDetailViewModel` needs from its streaming proxy.
+///
+/// Exists so tests can substitute a fake with a slow, observable bind and drive
+/// the abandon-mid-bind contract in `startAuthProxy` / `stopAuthProxy` without a
+/// real `NWListener`. `AuthProxy` is the only production conformer, and
+/// `proxyFactory` returns this type so a subclass cannot be widened by accident.
+protocol AuthProxyConsumeProtocol: Actor {
+    func start() async throws
+    func stop()
+    func proxyURL(for originalURL: URL) -> URL?
+    func networkURL(for originalURL: URL) -> URL?
 }

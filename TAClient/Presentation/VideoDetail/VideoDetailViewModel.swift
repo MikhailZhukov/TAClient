@@ -175,7 +175,18 @@ final class VideoDetailViewModel {
     /// `stopPlayback()` also calls `tearDown()` for the normal path.
     private let observerBag = ObserverBag()
     private let progressQueue = DispatchQueue(label: "ru.mzhukov.TAClient.player.progress", qos: .utility)
-    private var authProxy: AuthProxy?
+    private var authProxy: (any AuthProxyConsumeProtocol)?
+    /// Constructs the proxy used by `proxiedURL(for:token:forAirPlay:)`.
+    ///
+    /// Overridable test seam (`internal`, reachable only through
+    /// `@testable import TAClient`) so tests can substitute a fake proxy whose
+    /// bind is slow and observable — the only way to exercise the
+    /// abandon-mid-bind contract without a real `NWListener`. Production always
+    /// uses the default.
+    @ObservationIgnored
+    var proxyFactory: @MainActor (String, URL) -> any AuthProxyConsumeProtocol = { token, baseURL in
+        AuthProxy(token: token, serverBaseURL: baseURL)
+    }
     private var cachingResourceLoader: CachingResourceLoader?
     private var lastVLCPosition: Double = 0
     private var lastVLCProgressSave: Date = .distantPast
@@ -201,6 +212,40 @@ final class VideoDetailViewModel {
     /// `true` while the player item streams from the auth proxy's
     /// local-network URL, i.e. an AirPlay receiver can fetch it. MainActor only.
     private var isAirPlayAssetActive = false
+    /// Starting the proxy is async (`NWListener` bind) and can be in flight
+    /// while the user tears playback down. Sharing one task per pending bind,
+    /// plus a generation counter stamped at handoff, makes the whole
+    /// start/stop sequence deterministic:
+    ///
+    /// - `stopPlayback()` cancels the task and bumps `proxyGeneration`, so a
+    ///   proxy that finishes binding after playback went away is stopped by its
+    ///   own task instead of being installed into a slot the caller already
+    ///   cleared (the pre-fix behaviour: `stopAuthProxy()` stopped a proxy that
+    ///   was still in use, and the orphan bind left a listener bound with the
+    ///   user's token);
+    /// - `proxyStartCancelled` carries the abandon intent explicitly, because a
+    ///   task that completes successfully after `cancel()` is NOT reported as
+    ///   cancelled — `Task.isCancelled` alone cannot be the guard;
+    /// - `proxyInstallGeneration` records which handoff a running task belongs
+    ///   to, so a task whose slot was taken over neither installs a proxy nor
+    ///   clears its successor's state.
+    ///
+    /// All four fields are MainActor-only and `@ObservationIgnored` — private
+    /// lifecycle state, never read by the view.
+    @ObservationIgnored
+    private var authProxyTask: Task<(any AuthProxyConsumeProtocol)?, Never>?
+    @ObservationIgnored
+    private var proxyStartCancelled = false
+    @ObservationIgnored
+    private var proxyGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var proxyInstallGeneration: UInt64 = 0
+    /// Abandon signal for the handoff currently in flight, if any. Set by
+    /// `startAuthProxy` at handoff and marked by `cancelProxyStart()`. Kept
+    /// separately from `authProxyTask` because a caller can be suspended inside
+    /// `startAuthProxy` before its task exists.
+    @ObservationIgnored
+    private var pendingProxyAbandon: SendableBox<Bool>?
     private var sessionCoordinator: PlayerSessionCoordinator?
     private var nowPlaying: NowPlayingController?
 
@@ -302,9 +347,13 @@ final class VideoDetailViewModel {
     /// local-network URL the receiver can fetch; the fallback gets loopback.
     private func startDirectAVPlayback(video: Video, url: URL, token: String, forAirPlay: Bool) async {
         let proxied = await proxiedURL(for: url, token: token, forAirPlay: forAirPlay)
-        // `stopPlayback()` may have run while the proxy was starting.
+        // `stopPlayback()` may have run while the proxy was starting. Abandon
+        // without `stopAuthProxy()`: if a concurrent playback already installed
+        // this proxy, that playback owns it, and stopping it here would kill a
+        // live player. An orphan bind is stopped by its own task (see
+        // `startAuthProxy`), so nothing leaks either way.
         guard isBuffering, player == nil else {
-            stopAuthProxy()
+            cancelProxyStart()
             return
         }
         if let proxied {
@@ -681,27 +730,16 @@ final class VideoDetailViewModel {
     /// needs no custom request headers (there is no public API for them).
     /// `forAirPlay` returns a local-network address the receiver can reach
     /// instead of loopback.
+    ///
     private func proxiedURL(for url: URL, token: String, forAirPlay: Bool) async -> URL? {
-        let proxy: AuthProxy
+        let proxy: any AuthProxyConsumeProtocol
         if let existing = authProxy {
             proxy = existing
         } else {
             guard let baseURL = authState.baseURL else { return nil }
-            let newProxy = AuthProxy(token: token, serverBaseURL: baseURL)
-            do {
-                try await newProxy.start()
-            } catch {
-                logger.error("AuthProxy failed to start: \(error.localizedDescription)")
-                return nil
-            }
-            // Another caller may have installed a proxy while this one started.
-            if let existing = authProxy {
-                await newProxy.stop()
-                proxy = existing
-            } else {
-                authProxy = newProxy
-                proxy = newProxy
-            }
+            let newProxy = proxyFactory(token, baseURL)
+            guard let started = await startAuthProxy(newProxy) else { return nil }
+            proxy = started
         }
         if forAirPlay {
             return await proxy.networkURL(for: url)
@@ -709,10 +747,133 @@ final class VideoDetailViewModel {
         return await proxy.proxyURL(for: url)
     }
 
+    /// Bind `proxy` and install it as the VM's proxy, or return `nil` if this
+    /// start was abandoned (playback stopped, superseded, or bind failure).
+    ///
+    /// The install decision runs inside the task, on the MainActor, after the
+    /// bind's suspension point, and is guarded by `proxyGeneration` (stamped at
+    /// handoff) and a per-task abandon box rather than a shared flag. Two
+    /// properties make the outcome deterministic:
+    ///
+    /// - the post-bind guard below is synchronous, so once it falls through, the
+    ///   install is atomic with respect to `cancelProxyStart()` /
+    ///   `stopAuthProxy()` — both run on the MainActor and can no longer
+    ///   interleave before `authProxy = proxy`;
+    /// - the abandon box is per-handoff, so a concurrent caller that reuses the
+    ///   proxy while a bind is in flight cannot clear another handoff's signal
+    ///   (a shared flag could be reset by a sibling and silently un-abandon this
+    ///   one, leaving a bound socket nobody owns).
+    private func startAuthProxy(_ proxy: any AuthProxyConsumeProtocol) async -> (any AuthProxyConsumeProtocol)? {
+        let generation = proxyGeneration
+        // Per-handoff abandon signal, set by `cancelProxyStart()`.
+        let abandoned = SendableBox<Bool>(false)
+        pendingProxyAbandon = abandoned
+
+        let task = Task { @MainActor [weak self] () -> (any AuthProxyConsumeProtocol)? in
+            guard let self else { return nil }
+            do {
+                try await proxy.start()
+            } catch {
+                // Covers bind failure *and* cancellation of this task. Either
+                // way nobody owns the proxy, so release it here rather than
+                // leaving a listener bound. `stop()` is idempotent and safe on
+                // a proxy whose bind never completed.
+                logger.error("AuthProxy failed to start: \(error.localizedDescription)")
+                await proxy.stop()
+                return nil
+            }
+            // Abandoned while binding? `Task.isCancelled` alone is not enough:
+            // a task that finishes successfully after `cancel()` does not report
+            // itself cancelled, so the explicit signal carries the intent.
+            if Task.isCancelled || abandoned.current {
+                await proxy.stop()
+                return nil
+            }
+            self.authProxy = proxy
+            self.proxyInstallGeneration = generation
+            return proxy
+        }
+        authProxyTask = task
+
+        let installed = await task.value
+        // Clear the slot only if this handoff still owns it. If a newer
+        // `startAuthProxy` replaced `authProxyTask` while we were binding, the
+        // successor owns both the slot and its own task — do not touch either.
+        if authProxyTask === task {
+            authProxyTask = nil
+            if pendingProxyAbandon === abandoned { pendingProxyAbandon = nil }
+        }
+        return installed
+    }
+
+    /// Abandon a pending proxy bind and invalidate the current generation, so a
+    /// bind that completes after this point stops itself instead of installing.
+    /// Does NOT stop an already-installed proxy — callers that own one use
+    /// `stopAuthProxy()`.
+    private func cancelProxyStart() {
+        proxyGeneration += 1
+        // Mark the in-flight handoff abandoned. This must happen even when
+        // `authProxyTask` is nil, because a caller may already be suspended
+        // inside `startAuthProxy` before its task is created.
+        pendingProxyAbandon?.set(true)
+        // Wake the binding task. Authoritative rejection is the post-bind guard
+        // above, because a task that completes after `cancel()` does not report
+        // itself cancelled.
+        authProxyTask?.cancel()
+        authProxyTask = nil
+    }
+
+    /// Tear the proxy down: abandon any pending bind, then stop the installed
+    /// proxy unless the bind that was pending at entry installed it during this
+    /// call's suspension — in which case that task owns the socket and stops it,
+    /// and stopping it here would give one socket two owners.
     private func stopAuthProxy() {
+        let pending = authProxyTask
+        cancelProxyStart()
         guard let proxy = authProxy else { return }
         authProxy = nil
+        if let pending, proxyInstallGeneration == proxyGeneration,
+           (await pending.value) === proxy {
+            return
+        }
         Task { await proxy.stop() }
+    }
+
+    // MARK: - Proxy lifecycle test seams
+    //
+    // `internal` (not `private`) purely so `@testable import TAClient` can drive
+    // the start/abandon/stop state machine with a fake proxy. Production paths
+    // call the private methods directly; these add no behaviour.
+
+    func startAuthProxyForTests(_ proxy: any AuthProxyConsumeProtocol) async -> (any AuthProxyConsumeProtocol)? {
+        await startAuthProxy(proxy)
+    }
+
+    func cancelProxyStartForTests() {
+        cancelProxyStart()
+    }
+
+    /// Awaitable variant of `stopAuthProxy()` for tests: stops the installed
+    /// proxy inline instead of via a fire-and-forget Task, so the fake's stop
+    /// count is deterministic without a sleep.
+    func stopAuthProxyAwaitingForTests() async {
+        let pending = authProxyTask
+        cancelProxyStart()
+        guard let proxy = authProxy else { return }
+        authProxy = nil
+        if let pending, proxyInstallGeneration == proxyGeneration,
+           (await pending.value) === proxy {
+            return
+        }
+        await proxy.stop()
+    }
+
+    var installedProxyForTests: (any AuthProxyConsumeProtocol)? {
+        authProxy
+    }
+
+    var pendingProxyStartForTests: Bool {
+        authProxyTask != nil
     }
 
     /// Registers time + timeControlStatus observers scoped to the player
