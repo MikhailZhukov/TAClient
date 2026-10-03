@@ -1,26 +1,30 @@
 import Foundation
 
-/// Lock-guarded mutable cell for values that must cross a `@Sendable`
-/// boundary before they are formally immutable — the general shape of "install
-/// a cancel handler, then hand it the thing to cancel".
+/// Lock-guarded mutable cell for a value that must be readable and writable from
+/// arbitrary threads — the general shape of "install a cancel handler first, then
+/// hand it the thing to cancel".
 ///
-/// `SendableBox` is deliberately `@unchecked Sendable`: callers are
-/// responsible for the same discipline the rest of this codebase uses for
-/// lock-guarded `nonisolated(unsafe)` state — every read and write goes through
-/// the internal `NSLock`.
-final class SendableBox<Value>: @unchecked Sendable {
+/// Every member is explicitly `nonisolated`. That is required, not stylistic:
+/// `@unchecked Sendable` on a *generic* class does not by itself opt the type out
+/// of the target's `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, so without it the
+/// initializer and `set` are inferred MainActor and become uncallable from
+/// detached tasks, delegate queues and `@Sendable` closures. (`ObserverBag` gets
+/// away with plain members because it is non-generic; do not copy that here.)
+/// Thread-safety comes entirely from the internal `NSLock` — no member touches
+/// `value` outside it.
+nonisolated final class SendableBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Value
 
-    init(_ value: Value) {
+    nonisolated init(_ value: Value) {
         self.value = value
     }
 
-    var current: Value {
+    nonisolated var current: Value {
         lock.withLock { value }
     }
 
-    func set(_ newValue: Value) {
+    nonisolated func set(_ newValue: Value) {
         lock.withLock { value = newValue }
     }
 }
@@ -56,13 +60,12 @@ final class StreamingSession: NSObject, URLSessionDataDelegate, @unchecked Senda
     /// others:
     ///
     /// 1. the consumer drops, throws out of, or returns from the chunk loop —
-    ///    covered by `AsyncThrowingStream`'s `CancellationHandler`, which fires
-    ///    when the stream is finished or deallocated. It is installed in the
-    ///    initializer, BEFORE `resume()`; the old `dataContinuation?.onTermination
-    ///    = …` assignment ran after the response arrived, which was too late for a
-    ///    consumer that threw before entering the loop and a silent no-op when a
-    ///    tiny response let the delegate reach `finish()` first (leaving
-    ///    `dataContinuation` nil);
+    ///    covered by `continuation.onTermination`, set inside the stream builder and
+    ///    therefore installed BEFORE `resume()`. The old
+    ///    `dataContinuation?.onTermination = …` assignment ran after the response
+    ///    arrived, which was too late for a consumer that threw before entering the
+    ///    loop, and a silent no-op when a tiny response let the delegate reach
+    ///    `finish()` first (leaving `dataContinuation` nil);
     /// 2. `stream()` itself is cancelled while awaiting the response headers —
     ///    covered by `withTaskCancellationHandler`, because cancelling a Swift task
     ///    never cancels a bare `URLSessionTask`;
@@ -86,23 +89,22 @@ final class StreamingSession: NSObject, URLSessionDataDelegate, @unchecked Senda
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         self.session = session
         let task = session.dataTask(with: request)
-        // `onTermination` is only settable through
-        // `CancellationHandler` at construction — `AsyncThrowingStream` has no
-        // settable `onTermination` property — and construction happens before the
-        // task can be referenced by name, hence the box: it lets the handler exist
-        // first and be handed the task immediately after, both strictly before
-        // `resume()`. A no-op against an empty box is harmless because the task
-        // cannot be cancellable before `resume()`.
+        // `onTermination` is settable only on the `Continuation` inside the builder
+        // closure — there is no such property on a constructed stream, and no
+        // `CancellationHandler` initializer. The builder runs synchronously inside
+        // the initializer, so the handler is installed before `resume()`, which is
+        // the ordering that matters. The box exists because the handler must be
+        // created before the task it cancels can be named: the task is handed over
+        // on the next line, still strictly before `resume()`. A handler firing
+        // against an empty box is a harmless no-op, since a suspended task cannot be
+        // cancelled into a terminal state anyway.
         let box = SendableBox<URLSessionTask?>(nil)
 
-        let dataStream = AsyncThrowingStream<Data, Error>(
-            Data.self,
-            bufferingPolicy: .unbounded,
-            cancellationHandler: { @Sendable _ in
+        let dataStream = AsyncThrowingStream<Data, Error> { continuation in
+            continuation.onTermination = { @Sendable _ in
                 // Lock-guarded read; `URLSessionTask.cancel()` is thread-safe.
                 box.current?.cancel()
             }
-        ) { continuation in
             self.dataContinuation = continuation
         }
         box.set(task)
