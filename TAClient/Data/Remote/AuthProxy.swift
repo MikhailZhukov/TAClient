@@ -569,7 +569,7 @@ final class AuthProxyLease: @unchecked Sendable {
     private let lock = NSLock()
     private var _state: State = .pending
     nonisolated(unsafe) private var proxy: (any AuthProxyConsumeProtocol)?
-    nonisolated(unsafe) private var stopTask: Task<Void, Never>?
+    nonisolated(unsafe) private var _stoppingTask: Task<Void, Never>?
 
     init(proxy: any AuthProxyConsumeProtocol) {
         self.proxy = proxy
@@ -594,21 +594,35 @@ final class AuthProxyLease: @unchecked Sendable {
     /// of polling a counter or guessing a sleep.
     @discardableResult
     func startStopping() -> Task<Void, Never>? {
-        let claim: (proxy: any AuthProxyConsumeProtocol, task: Task<Void, Never>)? = lock.withLock {
+        // Claim the proxy and flip the state in one critical section, then create
+        // the task OUTSIDE the lock. Two invariants that cannot both be satisfied
+        // by "just build the task inside the lock":
+        //
+        // - `_stoppingTask` must never be observable as nil while the state is
+        //   `.stopping`, or `awaitStopping()` returns without joining anything;
+        // - the critical section must not call out to code we do not own.
+        //
+        // So the task is built after the claim, but the claim is expressed as
+        // `_stoppingTask = placeholder` FIRST and overwritten immediately, which
+        // keeps the first invariant. `Task.init` only schedules — it does not run
+        // the body — so the placeholder is never awaited for real work.
+        let claim: (any AuthProxyConsumeProtocol)? = lock.withLock {
             guard case .pending = _state else { return nil }
-            // Reserve the slot with a placeholder; replaced below with the real
-            // task before anyone can observe `.stopping` and await it.
-            let placeholder = Task<Void, Never> {}
+            _stoppingTask = Task<Void, Never> { }
             _state = .stopping
-            stopTask = placeholder
-            return (proxy, placeholder)
+            let claimed = proxy
+            // The lease stops owning the proxy reference the moment the stop is
+            // claimed: from here only the stop task (or an external taker) holds
+            // it, so a `deinit` cannot resurrect a second stop for the same socket.
+            proxy = nil
+            return claimed
         }
         guard let claim else { return nil }
         let task = Task { [weak self] in
-            await claim.proxy.stop()
+            await claim.stop()
             self?.markStopped()
         }
-        lock.withLock { if case .stopping = _state { stopTask = task } }
+        lock.withLock { if case .stopping = _state { _stoppingTask = task } }
         return task
     }
 
@@ -623,24 +637,30 @@ final class AuthProxyLease: @unchecked Sendable {
             return task
         }
         guard let adopted else { return }
-        let watcher = Task { [weak self] in
-            _ = await adopted.value
-            // Give the owning task's own `stop()` a chance to land on the actor
-            // first, so a normal handoff does not queue a redundant stop.
-            try? await Task.sleep(for: .milliseconds(100))
-            self?.startStopping()
+        // Created under the lock for the same reason as `startStopping`: the
+        // watcher must be joinable via `awaitStopping()` from the moment it exists.
+        lock.withLock {
+            guard case .adopted = _state else { return }
+            let watcher = Task { [weak self] in
+                _ = await adopted.value
+                // Give the owning task's own `stop()` a chance to land on the actor
+                // first, so a normal handoff does not queue a redundant stop.
+                try? await Task.sleep(for: .milliseconds(100))
+                self?.startStopping()
+            }
+            _stoppingTask = watcher
         }
-        lock.withLock { if case .adopted = _state { stopTask = watcher } }
     }
 
     /// Take the lease away from its owner so a `deinit` can finish the stop
     /// itself. Returns `nil` when the stop is already dispatched or completed —
     /// i.e. when there is nothing left for a taker to do.
     ///
-    /// Also drops the lease's reference to the proxy actor: if the lease itself
-    /// is the last thing holding the ViewModel alive through a retained closure,
-    /// a strong proxy reference here would keep the socket's owner alive too, and
-    /// `stop()` would be reachable only through the returned value.
+    /// The claim also installs a no-op `_stoppingTask`, so a concurrent
+    /// `awaitStopping()` joins something that completes rather than observing
+    /// `.stopping` with an empty slot and returning early — a caller waiting for
+    /// "the socket is released" would otherwise be told "done" while an external
+    /// stop is still in flight. The taker owns the real stop.
     func takeForExternalStop() -> (any AuthProxyConsumeProtocol)? {
         lock.withLock {
             guard case .pending = _state else {
@@ -649,6 +669,7 @@ final class AuthProxyLease: @unchecked Sendable {
             }
             let taken = proxy
             proxy = nil
+            _stoppingTask = Task<Void, Never> { }
             _state = .stopping
             return taken
         }
@@ -656,9 +677,24 @@ final class AuthProxyLease: @unchecked Sendable {
 
     /// Await the dispatched stop, if one is in flight. For tests and for any
     /// caller that must not proceed until the socket is actually released.
+    ///
+    /// Loops because of the adopted branch: while the lease waits on its owner
+    /// task, `_stoppingTask` holds that watcher, and the watcher's own
+    /// `startStopping()` replaces it with the real stop task. Re-reading until the
+    /// state is terminal keeps this correct without exposing the intermediate.
     func awaitStopping() async {
-        let task = lock.withLock { stopTask }
-        await task?.value
+        while true {
+            let snapshot = lock.withLock { (state: _state, task: _stoppingTask) }
+            if case .stopped = snapshot.state { return }
+            // `.pending` with no task: nobody has claimed the lease. Nothing to
+            // join — the owner (or `deinit`) still owes the stop.
+            guard let task = snapshot.task else { return }
+            await task.value
+            // Loop re-reads: an adopted watcher ends by calling `startStopping()`,
+            // which installs the REAL stop task in `_stoppingTask`. The loop exits
+            // on `.stopped`, so it cannot spin — every pass either returns or
+            // awaits a strictly later task.
+        }
     }
 
     private func markStopped() {
