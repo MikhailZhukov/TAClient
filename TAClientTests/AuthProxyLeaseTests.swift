@@ -8,6 +8,11 @@ import Foundation
 /// an object so those paths can tell "already claimed" from "nobody stopped it",
 /// which is the distinction that let a listener stay bound with the user's token
 /// inside it.
+///
+/// `.serialized`: the fakes count *effective* stops on actors that other tests in
+/// the same process also create and tear down, and those dispatches have no
+/// cross-test ordering.
+@Suite(.serialized)
 struct AuthProxyLeaseTests {
 
     // MARK: - Helpers

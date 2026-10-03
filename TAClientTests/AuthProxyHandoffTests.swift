@@ -89,6 +89,11 @@ actor HangingBindProxy: AuthProxyConsumeProtocol {
 /// direct fallback and the AirPlay swap, so two callers can now race, and the
 /// losing side either stopped a proxy that was in use or left a bound listener
 /// holding the user's token with nobody assigned to stop it.
+///
+/// `.serialized` for the same reason as `AuthProxyLeaseTests`: the assertions are
+/// on start/stop counts of proxies that other tests in the same process create and
+/// tear down, and those dispatches are not ordered across tests.
+@Suite(.serialized)
 struct AuthProxyHandoffTests {
 
     // MARK: - Helpers
@@ -198,9 +203,13 @@ struct AuthProxyHandoffTests {
         #expect(vm.installedProxyForTests === first)
 
         await vm.stopAuthProxyAwaitingForTests()
+        // `settle` joins the lease's own stop task, so there is no window where
+        // the state is still `.stopping`: the actor finishes `stop()` before the
+        // lease marks itself stopped.
         #expect(await first.stopCount == 1)
         #expect(vm.installedProxyForTests == nil)
-        #expect(vm.proxyLeaseForTests?.state == .stopped)
+        #expect(vm.proxyLeaseForTests?.state == .stopped,
+                "the ViewModel path must drive the lease to a terminal state")
     }
 
     // MARK: - Superseded handoff
