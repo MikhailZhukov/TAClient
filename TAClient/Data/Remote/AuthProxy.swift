@@ -24,7 +24,7 @@ import OSLog
 nonisolated final class AcceptedConnections: @unchecked Sendable {
     private let lock = NSLock()
     private var connections: [ObjectIdentifier: NWConnection] = [:]
-    private(set) var isShutdown = false
+    nonisolated private(set) var isShutdown = false
 
     nonisolated init(isShutdown: Bool = false) {
         self.isShutdown = isShutdown
