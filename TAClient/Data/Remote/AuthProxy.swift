@@ -153,7 +153,14 @@ actor AuthProxy {
     /// Shutdown flag plus the set of connections accepted by the current
     /// listener. `stop()` flips it and cancels everything still in flight, so
     /// no per-request streaming task survives the proxy that authorised it.
-    private var acceptedConnections: AcceptedConnections?
+    /// Peers accepted by the current listener, so `stop()` can cancel them
+    /// explicitly — `NWListener.cancel()` does not terminate already-accepted
+    /// connections, which is the leak this branch exists to close.
+    ///
+    /// `internal`, not `private`, solely so `AuthProxyTestSupport.swift` (app target)
+    /// can assert `stop()` tears the tracker down. `@testable import` from the test
+    /// target would not reach `private`. Nothing outside those two files reads it.
+    var acceptedConnections: AcceptedConnections?
 
     var localPort: UInt16 { port }
 
