@@ -398,13 +398,26 @@ actor AuthProxy {
             request.setValue(rangeHeader, forHTTPHeaderField: "Range")
         }
 
-        // Stream response to avoid loading entire video into memory
+        // Stream response to avoid loading entire video into memory.
+        //
+        // `streamer` is created OUTSIDE the `do` and the upstream is cancelled in
+        // `defer`, so the cancel covers every exit — including the `guard
+        // headerSent else { return }` below, which sits before the body loop and
+        // has no `try` boundary of its own.
+        //
+        // `StreamingSession.onTermination` cannot be relied on here: it fires when
+        // the stream object is dropped, whereas this relay notices a dead peer via a
+        // failed `NWConnection.send`. A peer that merely stops reading (an AirPlay
+        // receiver scrubbing away) fails no send at all — it parks the loop while the
+        // upstream keeps streaming a whole video to nobody, with
+        // `timeoutIntervalForResource = 0`.
+        let streamer = StreamingSession()
+        defer { streamer.cancelUpstream() }
         do {
             let config = URLSessionConfiguration.default
             config.timeoutIntervalForRequest = 0
             config.timeoutIntervalForResource = 0
 
-            let streamer = StreamingSession()
             let (httpResponse, chunks) = try await streamer.stream(request: request, configuration: config)
 
             // Build response header
@@ -436,6 +449,7 @@ actor AuthProxy {
             // Stream body — chunks arrive as Data from delegate, forward directly
             let sendChunkSize = Self.sendChunkSize
             var buffer = Data()
+            var downstreamGone = false
             for try await chunk in chunks {
                 buffer.append(chunk)
                 while buffer.count >= sendChunkSize {
@@ -447,11 +461,19 @@ actor AuthProxy {
                         })
                     }
                     if !ok {
+                        // Downstream is gone. Stop draining the upstream rather
+                        // than pulling the next 256 KB for a peer that is not
+                        // there; the outer `defer` cancels the request.
                         connection.cancel()
-                        return
+                        downstreamGone = true
+                        break
                     }
                 }
+                if downstreamGone { break }
             }
+
+            // Downstream failure: nothing to flush, no final message to send.
+            guard !downstreamGone else { return }
 
             // Flush remaining
             if !buffer.isEmpty {

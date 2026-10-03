@@ -245,6 +245,93 @@ extension DataLayerSuite {
                 "StreamingSession leaked after the consuming task was cancelled mid-body")
     }
 
+    /// `cancelUpstream()` is what a relay uses when its *downstream* dies: no
+    /// amount of stream plumbing cancels a `URLSessionTask` for a consumer that
+    /// is still holding the stream alive, so the session must expose an explicit
+    /// off-consumer cancel. Also pins that the call is safe (and effective) when
+    /// made before `stream(...)` even exists.
+    @Test("cancelUpstream cancels an in-flight request without dropping the stream")
+    func cancelUpstreamCancelsInFlightRequest() async throws {
+        let chunks: [Data] = (0..<16).map { _ in Data(repeating: 0x31, count: 4096) }
+        MockURLProtocol.slowStreamHandler = { _ in
+            let response = HTTPURLResponse(
+                url: Self.mockURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, chunks, 0.1)
+        }
+
+        weak var weakStreamer: StreamingSession?
+        let streamer = StreamingSession()
+        weakStreamer = streamer
+        let (_, stream) = try await streamer.stream(
+            request: makeRequest(),
+            configuration: makeConfig()
+        )
+        // Read exactly one chunk so the request is genuinely in flight, then
+        // cancel from "outside" while keeping `stream` alive.
+        var iterator = stream.makeAsyncIterator()
+        _ = try await iterator.next()
+
+        streamer.cancelUpstream()
+        streamer.cancelUpstream()  // idempotent
+
+        // The stream must terminate (with a cancellation error) rather than keep
+        // yielding the remaining ~1.5 s of chunks.
+        var receivedAfterCancel = 0
+        do {
+            while try await iterator.next() != nil {
+                receivedAfterCancel += 1
+            }
+        } catch {
+            // Expected: URLError.cancelled.
+        }
+        #expect(receivedAfterCancel == 0,
+                "upstream kept delivering after cancelUpstream (\(receivedAfterCancel) extra chunks)")
+
+        // Keep a strong ref until here so "the stream was never dropped" is true.
+        withExtendedLifetime(stream) {}
+        try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
+        #expect(weakStreamer == nil, "StreamingSession leaked after cancelUpstream")
+    }
+
+    /// `cancelUpstream()` before the task exists must not be lost — a relay can
+    /// notice a dead peer while the request is still being set up.
+    @Test("cancelUpstream before stream takes effect on the next request")
+    func cancelUpstreamBeforeStreamIsRemembered() async throws {
+        let chunks: [Data] = (0..<16).map { _ in Data(repeating: 0x32, count: 4096) }
+        MockURLProtocol.slowStreamHandler = { _ in
+            let response = HTTPURLResponse(
+                url: Self.mockURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, chunks, 0.1)
+        }
+
+        weak var weakStreamer: StreamingSession?
+        let streamer = StreamingSession()
+        weakStreamer = streamer
+        streamer.cancelUpstream()
+
+        do {
+            let (_, stream) = try await streamer.stream(
+                request: makeRequest(),
+                configuration: makeConfig()
+            )
+            // Already cancelled: at most the bytes already buffered, then an end.
+            for try await _ in stream {}
+        } catch {
+            // Expected: the pre-cancelled task fails immediately.
+        }
+
+        try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
+        #expect(weakStreamer == nil, "StreamingSession leaked after a pre-emptive cancelUpstream")
+    }
+
     /// Genuine network-error branch: the mock throws `URLError`, so
     /// `didCompleteWithError(error)` runs the error path through
     /// `responseContinuation?.resume(throwing:)` and then invalidates the

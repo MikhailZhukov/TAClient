@@ -32,10 +32,19 @@ final class SendableBox<Value>: @unchecked Sendable {
 
 /// Streams URL response data as chunks via URLSessionDataDelegate.
 /// More efficient than URLSession.AsyncBytes which iterates byte-by-byte.
-final class StreamingSession: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+final class StreamingSession: NSObject, @unchecked Sendable {
     private var dataContinuation: AsyncThrowingStream<Data, Error>.Continuation?
     private var responseContinuation: CheckedContinuation<HTTPURLResponse, any Error>?
     private var session: URLSession?
+    /// Guards `upstreamTask` / `cancelledUpstream`: `cancelUpstream()` is called
+    /// from a relay's send-failure path (a Network.framework queue), while
+    /// `setUpstreamTask` runs on the `stream()` caller's executor.
+    private let stateLock = NSLock()
+    /// The task handed to `onTermination`, kept so `cancelUpstream()` can reach it
+    /// from a context that has no reference to the stream (a relay whose
+    /// downstream vanished mid-body).
+    private var upstreamTask: URLSessionTask?
+    private var cancelledUpstream = false
 
     /// Start the request and hand back the response headers plus a stream of
     /// body chunks.
@@ -82,6 +91,7 @@ final class StreamingSession: NSObject, URLSessionDataDelegate, @unchecked Senda
             self.dataContinuation = continuation
         }
         box.set(task)
+        setUpstreamTask(task)
 
         do {
             let response: HTTPURLResponse = try await withTaskCancellationHandler {
@@ -116,6 +126,33 @@ final class StreamingSession: NSObject, URLSessionDataDelegate, @unchecked Senda
             throw error
         }
     }
+
+    /// Cancel the in-flight request from outside the consumer's own task.
+    ///
+    /// `AsyncThrowingStream.onTermination` fires when the *stream object* is
+    /// dropped, which is not how a relay notices a dead downstream: `AuthProxy`'s
+    /// forwarding loop sees a failed `NWConnection.send` and stops iterating while
+    /// still holding the stream, so the upstream task keeps running with
+    /// `timeoutIntervalForResource = 0`. Without this the request streams a whole
+    /// video to nobody, and the delegate-based session is never invalidated.
+    ///
+    /// Safe to call before, during, or after `stream(...)`; idempotent.
+    func cancelUpstream() {
+        let task: URLSessionTask? = stateLock.withLock {
+            cancelledUpstream = true
+            return upstreamTask
+        }
+        task?.cancel()
+    }
+
+    private func setUpstreamTask(_ task: URLSessionTask) {
+        let cancelNow = stateLock.withLock {
+            upstreamTask = task
+            return cancelledUpstream
+        }
+        if cancelNow { task.cancel() }
+    }
+
 
     // MARK: - URLSessionDataDelegate
 
