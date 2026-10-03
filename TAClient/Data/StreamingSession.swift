@@ -4,26 +4,36 @@ import Foundation
 /// arbitrary threads — the general shape of "install a cancel handler first, then
 /// hand it the thing to cancel".
 ///
-/// Isolation: plain `final class … : @unchecked Sendable` with `nonisolated` on
-/// each member — the `CachingResourceLoader` shape. Class-level `nonisolated` is
-/// NOT used: it cascades onto the mutable `value` storage, which is illegal for a
-/// mutable stored property. `@unchecked Sendable` alone would leave every member
-/// MainActor-inferred under this target's default isolation, hence the explicit
-/// per-member `nonisolated`. Thread-safety comes entirely from the `NSLock` — no
-/// member touches `value` outside it.
-final class SendableBox<Value>: @unchecked Sendable {
+/// Isolation: `nonisolated final class … : @unchecked Sendable`, with the mutable
+/// value as a plain `private var`. That is the repo convention for a lock-guarded,
+/// concurrency-neutral class — identical to `CacheStore` (`nonisolated final class`
+/// + plain `private var entry`), and the class-level form is what makes the whole
+/// type, mutable storage included, reachable from detached tasks, URLSession
+/// delegate queues and `@Sendable` closures.
+///
+/// Two things that do NOT work here, both tried and both rejected by the compiler:
+/// - a plain `final class` with `nonisolated` on members only: `nonisolated` on a
+///   method does not de-isolate the *properties* it touches, so every access warns
+///   "main actor-isolated property … can not be referenced from a nonisolated
+///   context" (an error in Swift 6 mode);
+/// - `nonisolated` on the mutable stored property itself: "'nonisolated' cannot be
+///   applied to mutable stored properties".
+///
+/// Thread-safety comes entirely from the `NSLock` — no member touches `value`
+/// outside it.
+nonisolated final class SendableBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Value
 
-    nonisolated init(_ value: Value) {
+    init(_ value: Value) {
         self.value = value
     }
 
-    nonisolated var current: Value {
+    var current: Value {
         lock.withLock { value }
     }
 
-    nonisolated func set(_ newValue: Value) {
+    func set(_ newValue: Value) {
         lock.withLock { value = newValue }
     }
 }
@@ -31,18 +41,28 @@ final class SendableBox<Value>: @unchecked Sendable {
 /// Streams URL response data as chunks via URLSessionDataDelegate.
 /// More efficient than URLSession.AsyncBytes which iterates byte-by-byte.
 final class StreamingSession: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private var dataContinuation: AsyncThrowingStream<Data, Error>.Continuation?
-    private var responseContinuation: CheckedContinuation<HTTPURLResponse, any Error>?
-    private var session: URLSession?
+    nonisolated(unsafe) private var dataContinuation: AsyncThrowingStream<Data, Error>.Continuation?
+    nonisolated(unsafe) private var responseContinuation: CheckedContinuation<HTTPURLResponse, any Error>?
+    nonisolated(unsafe) private var session: URLSession?
     /// Guards `upstreamTask` / `cancelledUpstream`: `cancelUpstream()` is called
     /// from a relay's send-failure path (a Network.framework queue), while
     /// `setUpstreamTask` runs on the `stream()` caller's executor.
     private let stateLock = NSLock()
-    /// The task handed to `onTermination`, kept so `cancelUpstream()` can reach it
-    /// from a context that has no reference to the stream (a relay whose
-    /// downstream vanished mid-body).
-    private var upstreamTask: URLSessionTask?
-    private var cancelledUpstream = false
+    /// The in-flight request, reachable without a stream reference so
+    /// `cancelUpstream()` works from a relay whose downstream vanished mid-body.
+    ///
+    /// `nonisolated(unsafe)` is required, not a shortcut: this class is a plain
+    /// `final class`, so under the target's default MainActor isolation the mutable
+    /// properties are MainActor and cannot be touched from the `nonisolated`
+    /// URLSession delegate callbacks or from Network.framework queues. That is the
+    /// same situation `ObserverBag` and `CacheStore` are in — they solve it with
+    /// `nonisolated final class`; `StreamingSession` was declared without it and the
+    /// three pre-existing properties above (`dataContinuation`,
+    /// `responseContinuation`, `session`) already need the same treatment, which is
+    /// applied to all five together. Every access to the two below goes through
+    /// `stateLock`.
+    nonisolated(unsafe) private var upstreamTask: URLSessionTask?
+    nonisolated(unsafe) private var cancelledUpstream = false
 
     /// Start the request and hand back the response headers plus a stream of
     /// body chunks.

@@ -17,46 +17,39 @@ import OSLog
 /// `newConnectionHandler` and the connection's `receive` completion run on
 /// arbitrary Network.framework queues; every access goes through the lock.
 ///
-/// Isolation pattern: plain `final class … : @unchecked Sendable` with
-/// `nonisolated` on every *method* — the same shape `CachingResourceLoader` uses.
-/// Two things this deliberately does NOT do, both of which I tried and both of
-/// which fail to compile:
+/// Isolation: `nonisolated final class … : @unchecked Sendable` with plain stored
+/// properties — the repo convention for a lock-guarded, concurrency-neutral class,
+/// identical to `CacheStore`. Required because `newConnectionHandler`, the
+/// connection's `receive` completion and the terminal-state handler below all run on
+/// arbitrary Network.framework queues and must reach this type's state without a
+/// MainActor hop.
 ///
-/// - `nonisolated final class` — the class-level form cascades onto mutable stored
-///   properties, which is illegal ("'nonisolated' cannot be applied to mutable
-///   stored properties"); `CacheStore` can use it only because every one of its
-///   mutable properties is already `nonisolated(unsafe)`;
-/// - `nonisolated` on a mutable stored property (`isShutdown`) — same error. The
-///   compiler's own note offers `nonisolated(unsafe)` as the escape hatch, which is
-///   exactly the right thing *not* to reach for here: the property is guarded by
-///   `lock`, and `nonisolated(unsafe)` would advertise "I am managing this by hand"
-///   while silently opting out of checking, so a future unguarded read would be
-///   invisible. Leaving it isolated-but-locked is what keeps the discipline visible.
-final class AcceptedConnections: @unchecked Sendable {
+/// What does NOT work, both tried and both rejected:
+/// - plain `final class` + `nonisolated` on methods only: de-isolating a method does
+///   not de-isolate the properties it touches, so every access warns
+///   "main actor-isolated property … can not be mutated from a nonisolated context";
+/// - `nonisolated` on a mutable stored property: "'nonisolated' cannot be applied to
+///   mutable stored properties".
+///
+/// The class-level form is the only one that covers mutable storage, and it is what
+/// the existing lock-guarded types in this codebase use.
+nonisolated final class AcceptedConnections: @unchecked Sendable {
     private let lock = NSLock()
     private var connections: [ObjectIdentifier: NWConnection] = [:]
-    /// Read and written ONLY under `lock`. `nonisolated(unsafe)` is not needed and
-    /// deliberately not used — see the isolation note on the type.
-    ///
-    /// Internal rather than `private` so the `nonisolated var isShutdown` accessor
-    /// below can reach it; `private` members are not visible to a `nonisolated`
-    /// member of the same type once that member is treated as an isolated context.
-    var shutdownFlag = false
+    /// Read and written only under `lock`. A plain stored property: the class-level
+    /// `nonisolated` already makes it reachable cross-thread, so no
+    /// `nonisolated(unsafe)` is needed, and none should be added — it would opt this
+    /// flag out of checking that the lock is what actually protects it.
+    private var shutdownFlag = false
 
-    /// Whether the tracker refuses new connections.
-    ///
-    /// An accessor, not a stored property, for two reasons: it is read from
-    /// `newConnectionHandler` and the `receive` completion (arbitrary
-    /// Network.framework queues) so it must be `nonisolated`, and `nonisolated`
-    /// cannot be applied to a mutable stored property — a stored `var` would either
-    /// fail to compile or need `nonisolated(unsafe)`, which would switch off
-    /// checking on a flag that is in fact lock-guarded. The accessor is the form
-    /// that is both callable cross-thread and honest about how it is protected.
-    nonisolated var isShutdown: Bool {
+    /// Whether the tracker refuses new connections. Lock-guarded read; exposed as a
+    /// method-shaped accessor so the call sites cannot bypass the lock the way a
+    /// bare property read would allow.
+    var isShutdown: Bool {
         lock.withLock { shutdownFlag }
     }
 
-    nonisolated init(isShutdown: Bool = false) {
+    init(isShutdown: Bool = false) {
         self.shutdownFlag = isShutdown
     }
 
@@ -70,7 +63,7 @@ final class AcceptedConnections: @unchecked Sendable {
     /// Returns `false` when the tracker is already shut down — the caller must
     /// refuse the connection in that case, because it was deliberately not
     /// tracked and nothing else will cancel it.
-    nonisolated func install(_ connection: NWConnection) -> Bool {
+    func install(_ connection: NWConnection) -> Bool {
         let tracked = lock.withLock { () -> Bool in
             guard !shutdownFlag else { return false }
             connections[ObjectIdentifier(connection)] = connection
@@ -97,7 +90,7 @@ final class AcceptedConnections: @unchecked Sendable {
         return tracked
     }
 
-    nonisolated func release(_ connection: NWConnection) {
+    func release(_ connection: NWConnection) {
         lock.withLock { connections[ObjectIdentifier(connection)] = nil }
     }
 
@@ -110,7 +103,7 @@ final class AcceptedConnections: @unchecked Sendable {
     /// first pass is still unwinding) re-cancels the same set instead of
     /// silently doing nothing, which matters because `AuthProxy.stop()` clears
     /// its own reference to the tracker immediately after the first call.
-    nonisolated func shutdown() {
+    func shutdown() {
         let pending = lock.withLock { () -> [NWConnection] in
             shutdownFlag = true
             return Array(connections.values)
@@ -121,7 +114,7 @@ final class AcceptedConnections: @unchecked Sendable {
     /// Drop a connection the framework reports as terminal, so a tracker that
     /// outlives its proxy (Network.framework keeps the connection alive until
     /// the close completes) does not pin dead peers indefinitely.
-    nonisolated func cancelAndRelease(_ connection: NWConnection) {
+    func cancelAndRelease(_ connection: NWConnection) {
         let known = lock.withLock { () -> Bool in
             guard connections[ObjectIdentifier(connection)] != nil else { return false }
             connections[ObjectIdentifier(connection)] = nil
@@ -130,7 +123,7 @@ final class AcceptedConnections: @unchecked Sendable {
         if known { connection.cancel() }
     }
 
-    nonisolated var count: Int {
+    var count: Int {
         lock.withLock { connections.count }
     }
 }
@@ -605,12 +598,12 @@ protocol AuthProxyConsumeProtocol: Actor {
 /// The lease closes that gap by making the pending stop an *object* the owner can
 /// see (`hasPendingTeardown`) and hand to whoever can finish it.
 ///
-/// Isolation is load-bearing: the whole point is that a `nonisolated` `deinit` and
-/// Network/actor callbacks reach this without a MainActor hop, and
-/// `@unchecked Sendable` alone leaves members MainActor-inferred under this target's
-/// default isolation. `nonisolated` therefore goes on each member (see
-/// `AcceptedConnections` for why it cannot go on the class or on mutable storage).
-final class AuthProxyLease: @unchecked Sendable {
+/// Isolation: `nonisolated final class … : @unchecked Sendable` (see
+/// `AcceptedConnections` for why this form and not per-member `nonisolated`). It is
+/// load-bearing rather than stylistic: the entire purpose of the lease is to be
+/// reachable from a `nonisolated` `VideoDetailViewModel.deinit` and from
+/// Network/actor callbacks without a MainActor hop.
+nonisolated final class AuthProxyLease: @unchecked Sendable {
     enum State: Sendable {
         /// Created, not yet stopping. A `deinit` that finds the lease in this
         /// state takes it over.
@@ -620,31 +613,28 @@ final class AuthProxyLease: @unchecked Sendable {
         /// `stop()` completed.
         case stopped
         /// The proxy was handed to a bind task that owns the socket; the lease
-        /// stops it only if that task ends without doing so.
-        case adopted(Task<Void, Never>)
+        /// stops it only if that task ends without doing so. The task itself is not
+        /// carried in the case payload — see `adopt(installedBy:)`.
+        case adopted
     }
 
     private let lock = NSLock()
     private var _state: State = .pending
-    /// Both are lock-guarded and use `nonisolated(unsafe)` because they are mutable
-    /// *reference* storage that must be reachable from the `nonisolated` members
-    /// above: there is no accessor form that helps here (unlike
-    /// `AcceptedConnections.isShutdown`, which is a value read), and the alternative
-    /// is leaving them MainActor-inferred and unreachable from `deinit`. Every read
-    /// and write goes through `lock`.
-    nonisolated(unsafe) private var proxy: (any AuthProxyConsumeProtocol)?
-    nonisolated(unsafe) private var _stoppingTask: Task<Void, Never>?
+    /// Both lock-guarded. Plain stored properties — the class-level `nonisolated`
+    /// covers them, so `nonisolated(unsafe)` is neither needed nor wanted.
+    private var proxy: (any AuthProxyConsumeProtocol)?
+    private var _stoppingTask: Task<Void, Never>?
 
-    nonisolated init(proxy: any AuthProxyConsumeProtocol) {
+    init(proxy: any AuthProxyConsumeProtocol) {
         self.proxy = proxy
     }
 
-    nonisolated var state: State {
+    var state: State {
         lock.withLock { _state }
     }
 
     /// `true` while a stop has been dispatched but not confirmed.
-    nonisolated var isStoppingOrStopped: Bool {
+    var isStoppingOrStopped: Bool {
         lock.withLock {
             if case .pending = _state { return false }
             return true
@@ -657,7 +647,7 @@ final class AuthProxyLease: @unchecked Sendable {
     /// `awaitStopping()` (tests) and any future coordinator can join it instead
     /// of polling a counter or guessing a sleep.
     @discardableResult
-    nonisolated func startStopping() -> Task<Void, Never>? {
+    func startStopping() -> Task<Void, Never>? {
         // Claim the proxy and flip the state in one critical section, then create
         // the task OUTSIDE the lock. Two invariants that cannot both be satisfied
         // by "just build the task inside the lock":
@@ -690,30 +680,32 @@ final class AuthProxyLease: @unchecked Sendable {
         return task
     }
 
-    /// Hand the socket to a bind task that will stop it after its own
-    /// suspension. The lease stays as a backstop: if that task ends without
-    /// stopping (it returned a proxy somebody else adopted, or was cancelled
-    /// between the install decision and the stop), the lease finishes the job.
-    nonisolated func adopt(installedBy task: Task<Void, Never>) {
+    /// Hand the socket to the bind task that is responsible for stopping it. The
+    /// lease stays as a backstop: if that task finishes without stopping (it handed
+    /// the proxy to someone else, or was cancelled between its install decision and
+    /// its own `stop()`), the lease finishes the job.
+    ///
+    /// Typed `Void`-success, not the concrete `Task<(any AuthProxyConsumeProtocol)?,
+    /// Never>` the ViewModel's bind task actually is, because `Task` is **not**
+    /// class-constrained: identity comparison (`===`) on a `Task` does not compile,
+    /// and naming a `Success` type here would force every call site to match it
+    /// exactly. So the ViewModel passes an erased `Task<Void, Never>` whose single
+    /// job is to outlive the real bind task, and this waits on that.
+    func adopt(installedBy task: Task<Void, Never>) {
         let adopted: Task<Void, Never>? = lock.withLock {
             guard case .pending = _state else { return nil }
-            _state = .adopted(task)
+            _state = .adopted
             return task
         }
         guard let adopted else { return }
-        // Created under the lock for the same reason as `startStopping`: the
-        // watcher must be joinable via `awaitStopping()` from the moment it exists.
-        lock.withLock {
-            guard case .adopted = _state else { return }
-            let watcher = Task { [weak self] in
-                _ = await adopted.value
-                // Give the owning task's own `stop()` a chance to land on the actor
-                // first, so a normal handoff does not queue a redundant stop.
-                try? await Task.sleep(for: .milliseconds(100))
-                self?.startStopping()
-            }
-            _stoppingTask = watcher
+        let watcher = Task { [weak self] in
+            _ = await adopted.value
+            // Give the owning task's own `stop()` a chance to land on the actor
+            // first, so a normal handoff does not queue a redundant stop.
+            try? await Task.sleep(for: .milliseconds(100))
+            self?.startStopping()
         }
+        lock.withLock { if case .adopted = _state { _stoppingTask = watcher } }
     }
 
     /// Take the lease away from its owner so a `deinit` can finish the stop
@@ -725,7 +717,7 @@ final class AuthProxyLease: @unchecked Sendable {
     /// `.stopping` with an empty slot and returning early — a caller waiting for
     /// "the socket is released" would otherwise be told "done" while an external
     /// stop is still in flight. The taker owns the real stop.
-    nonisolated func takeForExternalStop() -> (any AuthProxyConsumeProtocol)? {
+    func takeForExternalStop() -> (any AuthProxyConsumeProtocol)? {
         lock.withLock {
             guard case .pending = _state else {
                 proxy = nil
@@ -746,7 +738,7 @@ final class AuthProxyLease: @unchecked Sendable {
     /// task, `_stoppingTask` holds that watcher, and the watcher's own
     /// `startStopping()` replaces it with the real stop task. Re-reading until the
     /// state is terminal keeps this correct without exposing the intermediate.
-    nonisolated func awaitStopping() async {
+    func awaitStopping() async {
         while true {
             let snapshot = lock.withLock { (state: _state, task: _stoppingTask) }
             if case .stopped = snapshot.state { return }
@@ -761,7 +753,7 @@ final class AuthProxyLease: @unchecked Sendable {
         }
     }
 
-    nonisolated private func markStopped() {
+    private func markStopped() {
         lock.withLock {
             if case .stopping = _state { _state = .stopped }
             proxy = nil
@@ -777,7 +769,7 @@ extension AuthProxyLease {
     /// `Sendable` and its state sits behind an `NSLock` — the same pattern the
     /// codebase already uses for lock-guarded `nonisolated(unsafe)` state that
     /// crosses the MainActor boundary.
-    nonisolated var hasPendingTeardown: Bool {
+    var hasPendingTeardown: Bool {
         lock.withLock {
             if case .pending = _state { return proxy != nil }
             return false
