@@ -234,6 +234,18 @@ final class VideoDetailViewModel {
     /// lifecycle state, never read by the view.
     @ObservationIgnored
     private var bindTask: Task<(any AuthProxyConsumeProtocol)?, Never>?
+    /// The generation of the handoff that currently OWNS `authProxy`, or `nil` when
+    /// no handoff owns it (never started, or torn down).
+    ///
+    /// A separate field from `proxyInstallGeneration` on purpose. Ownership cannot be
+    /// inferred from `proxyInstallGeneration == myGeneration`, because that is also
+    /// true of a handoff that SUCCEEDED and returned its proxy to a live caller — the
+    /// success path and the abandoned-but-installed path are indistinguishable that
+    /// way, and treating them alike clears a proxy a player is actively using.
+    /// Ownership must therefore be *recorded* by whoever installs, and released by
+    /// whoever hands the proxy off (the caller, or `stopAuthProxy`).
+    @ObservationIgnored
+    private var proxyOwnerGeneration: UInt64?
     /// The current bind task, erased to `Task<Void, Never>`.
     ///
     /// Exists because `Task` is not class-constrained, so it cannot be passed as
@@ -785,17 +797,29 @@ final class VideoDetailViewModel {
     ///
     /// The install decision runs inside the task, on the MainActor, after the
     /// bind's suspension point, and is guarded by `proxyGeneration` (stamped at
-    /// handoff) and a per-task abandon box rather than a shared flag. Two
-    /// properties make the outcome deterministic:
+    /// handoff) plus a per-handoff abandon box. Two properties make the outcome
+    /// deterministic:
     ///
-    /// - the post-bind guard below is synchronous, so once it falls through, the
-    ///   install is atomic with respect to `cancelProxyStart()` /
-    ///   `stopAuthProxy()` — both run on the MainActor and can no longer
-    ///   interleave before `authProxy = proxy`;
-    /// - the abandon box is per-handoff, so a concurrent caller that reuses the
-    ///   proxy while a bind is in flight cannot clear another handoff's signal
-    ///   (a shared flag could be reset by a sibling and silently un-abandon this
-    ///   one, leaving a bound socket nobody owns).
+    /// - the post-bind guard inside the task is synchronous, so once it falls
+    ///   through the install is atomic with respect to `cancelProxyStart()` /
+    ///   `stopAuthProxy()` — both run on the MainActor and can no longer interleave
+    ///   before `authProxy = proxy`;
+    /// - the abandon box is per-handoff, so a concurrent caller that reuses the proxy
+    ///   while a bind is in flight cannot clear another handoff's signal (a shared
+    ///   flag could be reset by a sibling and silently un-abandon this one, leaving a
+    ///   bound socket nobody owns).
+    ///
+    /// Post-await slot bookkeeping keys off `proxyOwnerGeneration`, recorded by the
+    /// task when it installs — NOT off task identity, and NOT off
+    /// `proxyInstallGeneration == generation`:
+    ///
+    /// - `===` on a `Task` does not compile (not class-constrained), and
+    ///   `cancelProxyStart()` nils `bindTask` anyway, so an identity check would be
+    ///   false exactly on the abandoned-then-installed path that needs the cleanup;
+    /// - `proxyInstallGeneration == generation` is equally true of a handoff that
+    ///   SUCCEEDED and returned its proxy to a live caller, so acting on it there
+    ///   would clear a proxy a player is using. Ownership has to be recorded, not
+    ///   inferred.
     private func startAuthProxy(_ proxy: any AuthProxyConsumeProtocol) async -> (any AuthProxyConsumeProtocol)? {
         let generation = proxyGeneration
         // Per-handoff abandon signal, marked by `cancelProxyStart()`.
@@ -824,23 +848,33 @@ final class VideoDetailViewModel {
             }
             self.authProxy = proxy
             self.proxyInstallGeneration = generation
+            self.proxyOwnerGeneration = generation
             return proxy
         }
         bindTask = bind
         // Erased twin: finishes strictly after `bind`, which is all the lease's
-        // adopted-backstop needs to observe.
+        // adopted-backstop needs to observe. Cleared below once `bind` completes.
         bindTaskBox.set(Task { [_bind = bind] in _ = await _bind.value })
 
         let installed = await bind.value
-        // Clear the slot only if this handoff still owns it. If a newer
-        // `startAuthProxy` replaced `bindTask` while we were binding, the successor
-        // owns both the slot and its own twin — do not touch either.
-        if bindTask === bind {
-            bindTask = nil
-            if pendingProxyAbandon === abandoned { pendingProxyAbandon = nil }
-            // `bind` is finished here, so the twin has nothing left to observe.
-            bindTaskBox.set(nil)
+        // This task installed the proxy but is returning nil, i.e. it is handing
+        // ownership to nobody: the caller abandoned the start. Nothing else can stop
+        // this socket, so the slot is released here and the task stops the proxy
+        // itself (it already did so before returning nil; this is the case where the
+        // install won the race against the abandon check).
+        if installed == nil, proxyOwnerGeneration == generation {
+            authProxy = nil
+            proxyOwnerGeneration = nil
+            proxyInstallGeneration = 0
         }
+        // Success: the caller now holds the proxy, so the VM stops tracking it as
+        // "owned by an in-flight bind". A later `stopAuthProxy` still finds it via
+        // `authProxy`.
+        if installed != nil, proxyOwnerGeneration == generation {
+            proxyOwnerGeneration = nil
+        }
+        if pendingProxyAbandon === abandoned { pendingProxyAbandon = nil }
+        bindTaskBox.set(nil)
         return installed
     }
 
@@ -887,10 +921,13 @@ final class VideoDetailViewModel {
         guard let proxy = authProxy else { return }
         authProxy = nil
         proxyTeardown = AuthProxyLease(proxy: proxy)
-        // The bind task owns the socket when it installed the proxy during this
-        // teardown's own suspension. Hand the lease its erased twin to watch as a
-        // backstop; if the bind is already gone, `startStopping` below is the stop.
-        if pending != nil, let watchedBind = adoptedTwin, proxyInstallGeneration == proxyGeneration {
+        // A bind that installed the proxy AND still owns it (i.e. it installed after
+        // this teardown's generation bump, so the teardown never released ownership)
+        // is the socket's owner and will stop it. Hand the lease the erased twin to
+        // watch as a backstop. Otherwise this teardown owns the proxy and stops it.
+        if pending != nil, let watchedBind = adoptedTwin, let owner = proxyOwnerGeneration,
+           owner == proxyGeneration {
+            proxyOwnerGeneration = nil
             proxyTeardown?.adopt(installedBy: watchedBind)
             return
         }
