@@ -275,19 +275,15 @@ final class VideoDetailViewModel {
     /// that a `nonisolated` deinit can read and drain.
     deinit {
         observerBag.tearDown()
-        // Safety net for teardown that never ran. `deinit` is `nonisolated` in
-        // Swift 6: it cannot await, and it cannot read `authProxy` (MainActor
-        // state). It CAN read `proxyTeardown` through `AuthProxyLease.takeFor
-        // ExternalStop()`, which is a lock-guarded, nonisolated operation on a
-        // Sendable object — that is the whole reason the teardown path is a lease
-        // rather than a bare `Task`.
+        // Drain the proxy through the lease. `takeForExternalStop()` is
+        // lock-guarded on a `Sendable` object, so it is reachable from here where
+        // `authProxy` is not.
         //
         // Returns nil when a stop was already dispatched or completed, so a
         // normal pop (view `onDisappear` -> `stopPlayback()`) makes this a no-op
         // and never races the in-flight teardown. A non-nil return means nobody
-        // ever claimed the proxy, so the detached task below stops it. The task
-        // retains only the proxy actor, never `self`, so it can finish after the
-        // ViewModel is gone.
+        // ever claimed the proxy, so the task below stops it. It retains only the
+        // proxy actor, never `self`, so it can finish after the ViewModel is gone.
         if let orphan = proxyTeardown?.takeForExternalStop() {
             Task { [weak orphan] in
                 await orphan?.stop()
