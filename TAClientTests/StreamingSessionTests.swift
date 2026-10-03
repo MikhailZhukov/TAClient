@@ -240,11 +240,16 @@ extension DataLayerSuite {
             let streamer = StreamingSession()
             weakStreamer = streamer
             defer { streamer.cancelUpstream() }
-            let (_, stream) = try? await streamer.stream(
+            // `try?` here would produce `Optional<(response, chunks)>` — a single
+            // optional TUPLE, which cannot be destructured into `(_, stream)`. Every
+            // other test in this file calls with `try await` and destructures the
+            // non-optional tuple; do the same and absorb a throw in the catch below
+            // (a stream-establishment failure is as valid an outcome here as a
+            // mid-body throw, and the assertion is about the weak reference).
+            let (_, stream) = try await streamer.stream(
                 request: makeRequest(),
                 configuration: makeConfig()
             )
-            guard let stream else { return }
             do {
                 for try await _ in stream {
                     iterations.set(iterations.current + 1)
@@ -256,7 +261,10 @@ extension DataLayerSuite {
 
         try await Task.sleep(for: .milliseconds(250))
         task.cancel()
-        await task.value
+        // `task` has a `Void` success type, so this await yields nothing — but it is
+        // still required: it is the join that proves the consumer finished (and its
+        // `defer { cancelUpstream() }` ran) before the weak reference is checked.
+        _ = await task.value
 
         #expect(iterations.current >= 1, "the consumer should have started reading")
         try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
