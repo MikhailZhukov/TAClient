@@ -195,7 +195,12 @@ extension DataLayerSuite {
         // Bounded so an ignored cancellation fails the test instead of hanging the
         // suite for the URLSession's 60 s request timeout.
         let threw = await withTaskGroup(of: Bool?.self) { group in
-            group.addTask { await task.value }
+            // `try?` rather than propagating: a stream cancellation here is the
+            // outcome under test, and `withTaskGroup` would rethrow it out of the
+            // helper. The task's own `catch` already maps it to `true`, so the
+            // `nil` this yields on a throw is unreachable in practice — it just
+            // keeps the group's element type (`Bool?`) honest.
+            group.addTask { try? await task.value }
             group.addTask {
                 try? await Task.sleep(for: .seconds(10))
                 return nil
@@ -261,10 +266,17 @@ extension DataLayerSuite {
 
         try await Task.sleep(for: .milliseconds(250))
         task.cancel()
-        // `task` has a `Void` success type, so this await yields nothing — but it is
-        // still required: it is the join that proves the consumer finished (and its
-        // `defer { cancelUpstream() }` ran) before the weak reference is checked.
-        _ = await task.value
+        // The join that proves the consumer finished — and its
+        // `defer { cancelUpstream() }` ran — before the weak reference is checked.
+        //
+        // `try` is required even though the closure is non-throwing: `Task.value` is
+        // a `rethrows` property, and Swift demands `try` at any await of it whose
+        // failure type is not statically `Never`. This task's closure catches its own
+        // errors, so `Success`/`Failure` are `Void`/`Never` and the call can never
+        // actually throw. `try?` is the honest spelling: it satisfies the checker
+        // without pretending a throw is expected, and dropping the await entirely
+        // would race the leak assertion below.
+        _ = try? await task.value
 
         #expect(iterations.current >= 1, "the consumer should have started reading")
         try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
