@@ -4,15 +4,14 @@ import Foundation
 /// arbitrary threads — the general shape of "install a cancel handler first, then
 /// hand it the thing to cancel".
 ///
-/// Every member is explicitly `nonisolated`. That is required, not stylistic:
-/// `@unchecked Sendable` on a *generic* class does not by itself opt the type out
-/// of the target's `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, so without it the
-/// initializer and `set` are inferred MainActor and become uncallable from
-/// detached tasks, delegate queues and `@Sendable` closures. (`ObserverBag` gets
-/// away with plain members because it is non-generic; do not copy that here.)
-/// Thread-safety comes entirely from the internal `NSLock` — no member touches
-/// `value` outside it.
-nonisolated final class SendableBox<Value>: @unchecked Sendable {
+/// Isolation: plain `final class … : @unchecked Sendable` with `nonisolated` on
+/// each member — the `CachingResourceLoader` shape. Class-level `nonisolated` is
+/// NOT used: it cascades onto the mutable `value` storage, which is illegal for a
+/// mutable stored property. `@unchecked Sendable` alone would leave every member
+/// MainActor-inferred under this target's default isolation, hence the explicit
+/// per-member `nonisolated`. Thread-safety comes entirely from the `NSLock` — no
+/// member touches `value` outside it.
+final class SendableBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Value
 
