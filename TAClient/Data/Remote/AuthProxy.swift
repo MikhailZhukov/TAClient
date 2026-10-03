@@ -527,6 +527,11 @@ actor AuthProxy {
 
 /// The surface `VideoDetailViewModel` needs from its streaming proxy.
 ///
+/// Conforming in a protocol extension (rather than declaring conformance on
+/// `AuthProxy`) keeps this seam additive: `AuthProxy`'s own method signatures
+/// stay free of `any ...` return types, and a fake only has to implement these
+/// four members. `AuthProxy` satisfies it structurally.
+///
 /// Exists so tests can substitute a fake with a slow, observable bind and drive
 /// the abandon-mid-bind contract in `startAuthProxy` / `stopAuthProxy` without a
 /// real `NWListener`. `AuthProxy` is the only production conformer, and
@@ -720,3 +725,5 @@ extension AuthProxyLease {
         }
     }
 }
+
+extension AuthProxy: AuthProxyConsumeProtocol {}

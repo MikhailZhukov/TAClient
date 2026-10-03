@@ -262,10 +262,17 @@ final class VideoDetailViewModel {
     }
 
     /// Safety net for abnormal teardown paths (e.g. VM released without
-    /// `stopPlayback()` being called). `observerBag.tearDown()` is nonisolated
-    /// and thread-safe, so deinit — which Swift 6 runs without implicit
-    /// MainActor isolation — can invoke it directly. The bag is idempotent,
-    /// so double tear-downs from `stopPlayback` + deinit are harmless.
+    /// `stopPlayback()` being called).
+    ///
+    /// Everything here must be reachable without a MainActor hop, because Swift 6
+    /// runs `deinit` without actor isolation: no `await`, no access to
+    /// `@MainActor` stored state. `observerBag.tearDown()` qualifies (its tokens
+    /// are held in a thread-safe bag, and it is idempotent, so double tear-downs
+    /// from `stopPlayback` + deinit are harmless). The proxy is the one resource
+    /// that does NOT qualify directly — `authProxy` is MainActor state and
+    /// `AuthProxy.stop()` is an actor call — which is exactly why the teardown
+    /// path is an `AuthProxyLease`: a `Sendable` object with lock-guarded state
+    /// that a `nonisolated` deinit can read and drain.
     deinit {
         observerBag.tearDown()
         // Safety net for teardown that never ran. `deinit` is `nonisolated` in
