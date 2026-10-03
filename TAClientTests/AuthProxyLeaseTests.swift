@@ -109,7 +109,7 @@ struct AuthProxyLeaseTests {
     /// a backstop. A task that stops the proxy itself must not trigger a second
     /// stop.
     @Test("adopted lease does not double-stop when the task stops it")
-    async throws {
+    func adoptedLeaseDoesNotDoubleStopWhenOwnerStopsIt() async throws {
         let proxy = SpyProxy()
         let lease = AuthProxyLease(proxy: proxy)
 
@@ -130,7 +130,7 @@ struct AuthProxyLeaseTests {
     /// The backstop must fire when the owning task ends WITHOUT stopping — that
     /// is the leak this branch exists for.
     @Test("adopted lease stops when the owning task does not")
-    async throws {
+    func adoptedLeaseStopsWhenOwnerDoesNot() async throws {
         let proxy = SpyProxy()
         let lease = AuthProxyLease(proxy: proxy)
 
@@ -145,7 +145,7 @@ struct AuthProxyLeaseTests {
     }
 
     @Test("adopt after startStopping is ignored")
-    async throws {
+    func adoptAfterStartStoppingIsIgnored() async throws {
         let proxy = SpyProxy()
         let lease = AuthProxyLease(proxy: proxy)
         lease.startStopping()
@@ -157,6 +157,7 @@ struct AuthProxyLeaseTests {
         try await Task.sleep(for: .milliseconds(300))
         #expect(await proxy.effectiveStops == 1, "the ignored adopt must not add a second stop")
     }
+
     // MARK: - deinit handoff shape
 
     /// Reproduces the exact `VideoDetailViewModel.deinit` shape: a `nonisolated`
