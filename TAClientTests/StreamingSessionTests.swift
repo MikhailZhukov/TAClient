@@ -192,7 +192,19 @@ extension DataLayerSuite {
 
         try await Task.sleep(for: .milliseconds(200))
         task.cancel()
-        #expect(await task.value, "stream() should have thrown after cancellation")
+        // Bounded so an ignored cancellation fails the test instead of hanging the
+        // suite for the URLSession's 60 s request timeout.
+        let threw = await withTaskGroup(of: Bool?.self) { group in
+            group.addTask { await task.value }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(10))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+        #expect(threw == true, "stream() should have thrown after cancellation")
 
         try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
         #expect(weakStreamer == nil, "StreamingSession leaked after the awaiting task was cancelled")
