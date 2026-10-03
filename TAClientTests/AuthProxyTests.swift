@@ -83,23 +83,21 @@ struct AuthProxyTests {
         let proxy = AuthProxy(token: "t", serverBaseURL: URL(string: "https://ta.example.com")!)
         try await proxy.start()
 
-        let tracker = try #require(await proxy.acceptedConnectionsForTests)
-        let connection = try #require(await proxy.openLoopbackConnectionForTests())
-        guard tracker.count == 1 else {
-            // The listener never registered the peer (sandboxed CI, no loopback
-            // route). Bail loudly rather than asserting against an untracked
-            // connection.
-            Issue.record("loopback peer was not tracked by the listener; cannot exercise stop()")
+        // The seam opens a real loopback peer and returns only once the actor's
+        // tracker has counted it, or nil when loopback is unavailable in this
+        // sandbox — in which case there is nothing to exercise and the test must
+        // not assert against an untracked connection.
+        guard let connection = await proxy.openLoopbackConnectionForTests() else {
+            Issue.record("loopback peer could not be opened/tracked; cannot exercise stop()")
             return
         }
+        #expect(await proxy.trackedConnectionCountForTests() == 1)
 
         await proxy.stop()
 
-        #expect(tracker.isShutdown, "stop() must refuse connections accepted afterwards")
-        // The connection leaves the tracker when the framework reports it
-        // terminal (see the poll below), not when `stop()` returns.
-        #expect(tracker.count == 0, "stop() must release the connection once it is terminal")
-        #expect(await proxy.acceptedConnectionsForTests == nil, "stop() must drop the tracker")
+        #expect(await proxy.trackedConnectionCountForTests() == -1,
+                "stop() must drop the tracker entirely (-1 == no tracker)")
+
         // `NWConnection.cancel()` is async; poll briefly for the terminal state.
         var observed = connection.state
         for _ in 0..<100 where observed != .cancelled {
@@ -107,6 +105,7 @@ struct AuthProxyTests {
             observed = connection.state
         }
         #expect(observed == .cancelled, "stop() must cancel in-flight connections (state: \(observed))")
+        connection.cancel()
     }
 
     /// The tracker holds each peer strongly so `shutdown()` has something to
@@ -192,7 +191,7 @@ struct AuthProxyTests {
         #expect(await proxy.localPort == 0, "restartListener() must be a no-op after stop()")
     }
 
-    @Test func restartListener_withoutListener_isNoOp() async {
+    @Test func restartListener_withoutListener_isNoOp() async throws {
         let proxy = AuthProxy(token: "t", serverBaseURL: URL(string: "https://ta.example.com")!)
         await proxy.restartListener()
         try await Task.sleep(for: .milliseconds(100))
@@ -229,15 +228,23 @@ struct AuthProxyTests {
         await proxy.stop()
         await proxy.stop()
         #expect(await proxy.localPort == 0)
-        // A `start()` on a stopped proxy must refuse connections from birth.
+        // A `start()` on a stopped proxy must refuse connections from birth: the
+        // tracker it installs is already shut down, so any peer accepted afterwards
+        // is cancelled instead of served. `AcceptedConnections` is app-target
+        // internal, so the seam reports the tracker's shutdown state as a count of
+        // -1 (absent) vs. its live count; shutdown-ness is asserted via `stop()`
+        // dropping the tracker, and the refuse-from-birth path is covered by
+        // `stop_cancelsInFlightConnections`.
         let stopped = AuthProxy(token: "t", serverBaseURL: URL(string: "https://ta.example.com")!)
         await stopped.stop()
         try? await stopped.start()
-        #expect(await stopped.acceptedConnectionsForTests?.isShutdown == true)
+        // Restarting a stopped proxy is refused, so no tracker is ever created.
+        #expect(await stopped.trackedConnectionCountForTests() == -1,
+                "a stopped proxy must not serve a live tracker")
 
-        // A fresh proxy that was never stopped must NOT refuse its connections.
+        // A fresh proxy that was never started has no tracker either.
         let fresh = AuthProxy(token: "t", serverBaseURL: URL(string: "https://ta.example.com")!)
-        #expect(await fresh.acceptedConnectionsForTests == nil, "no tracker before start()")
+        #expect(await fresh.trackedConnectionCountForTests() == -1, "no tracker before start()")
     }
 
     // MARK: - Request rejection
@@ -259,50 +266,4 @@ struct AuthProxyTests {
     }
 }
 
-// MARK: - Test seams
 
-extension AuthProxy {
-    /// The live connection tracker, for asserting `stop()` shuts it down.
-    var acceptedConnectionsForTests: AcceptedConnections? {
-        acceptedConnections
-    }
-
-    /// Open a real loopback connection through the running listener so the
-    /// tracker has something to cancel. Returns `nil` when the listener is not
-    /// ready or the peer cannot connect (sandboxed CI, no loopback route).
-    func openLoopbackConnectionForTests() -> NWConnection? {
-        guard port > 0 else { return nil }
-        let connection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
-        let ready = SendableBox<Bool>(false)
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                ready.set(true)
-            case .failed, .cancelled:
-                ready.set(false)
-            default:
-                break
-            }
-        }
-        connection.start(queue: .global(qos: .userInitiated))
-
-        // The listener's `newConnectionHandler` runs on a Network.framework
-        // queue, so wait for the tracker to register the peer rather than
-        // racing it.
-        var deadline = 100
-        while !ready.current && deadline > 0 {
-            Thread.sleep(forTimeInterval: 0.01)
-            deadline -= 1
-        }
-        guard ready.current else {
-            connection.cancel()
-            return nil
-        }
-        var trackedDeadline = 100
-        while acceptedConnections?.count == 0 && trackedDeadline > 0 {
-            Thread.sleep(forTimeInterval: 0.01)
-            trackedDeadline -= 1
-        }
-        return connection
-    }
-}

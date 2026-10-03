@@ -216,6 +216,10 @@ struct AuthProxyHandoffTests {
 
     /// A handoff that is still binding while a newer one takes the slot must
     /// stop its own socket and must not clobber the successor's state.
+    ///
+    /// Note the two-phase abandon: `cancelProxyStartForTests()` marks the pending
+    /// generation abandoned, and a subsequent start installs normally because the
+    /// abandon signal is per-handoff, not shared.
     @Test("superseded bind stops itself and leaves the successor installed")
     func supersededBindDoesNotClobberSuccessor() async throws {
         let vm = makeViewModel()
