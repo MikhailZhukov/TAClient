@@ -198,13 +198,19 @@ extension DataLayerSuite {
         #expect(weakStreamer == nil, "StreamingSession leaked after the awaiting task was cancelled")
     }
 
-    /// The task that awaits the chunk loop is cancelled mid-body. Neither
-    /// `AsyncThrowingStream`'s `onTermination` (the stream is still alive, not
-    /// deallocated) nor `URLSessionTask` cancellation follows from cancelling a
-    /// Swift task, so this needed an explicit `onTermination` on the returned
-    /// stream.
-    @Test("session reclaimed when the consuming task is cancelled mid-body")
-    func sessionInvalidatedWhenConsumingTaskCancelledMidBody() async throws {
+    /// Exit 3 of `stream`'s cancellation contract: the consumer's *task* is
+    /// cancelled while suspended inside the chunk loop. `AsyncThrowingStream`
+    /// cannot observe this — the stream object stays alive, so its
+    /// `CancellationHandler` never fires — so the contract is that the call site
+    /// must reach for `cancelUpstream()`.
+    ///
+    /// This test pins the half that `StreamingSession` does owe: a consumer that
+    /// pairs task cancellation with `cancelUpstream()` (as `AuthProxy` and
+    /// `VideoDetailViewModel` do) is reclaimed. The `defer`-style pairing is the
+    /// documented mitigation, so it needs a test that exercises exactly it rather
+    /// than a bare `task.cancel()` that the class makes no promise about.
+    @Test("consuming task cancelled mid-body + cancelUpstream reclaims the session")
+    func consumingTaskCancelledMidBodyWithExplicitCancel() async throws {
         let chunks: [Data] = (0..<16).map { _ in Data(repeating: 0x77, count: 4096) }
         MockURLProtocol.slowStreamHandler = { _ in
             let response = HTTPURLResponse(
@@ -221,6 +227,7 @@ extension DataLayerSuite {
         let task = Task {
             let streamer = StreamingSession()
             weakStreamer = streamer
+            defer { streamer.cancelUpstream() }
             let (_, stream) = try? await streamer.stream(
                 request: makeRequest(),
                 configuration: makeConfig()

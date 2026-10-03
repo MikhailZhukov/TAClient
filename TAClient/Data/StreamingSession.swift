@@ -23,16 +23,11 @@ final class SendableBox<Value>: @unchecked Sendable {
     func set(_ newValue: Value) {
         lock.withLock { value = newValue }
     }
-
-    /// Cancel helper for the `URLSessionTask?` case: a no-op while empty.
-    func cancelContents() where Value == URLSessionTask? {
-        current?.cancel()
-    }
 }
 
 /// Streams URL response data as chunks via URLSessionDataDelegate.
 /// More efficient than URLSession.AsyncBytes which iterates byte-by-byte.
-final class StreamingSession: NSObject, @unchecked Sendable {
+final class StreamingSession: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private var dataContinuation: AsyncThrowingStream<Data, Error>.Continuation?
     private var responseContinuation: CheckedContinuation<HTTPURLResponse, any Error>?
     private var session: URLSession?
@@ -55,20 +50,35 @@ final class StreamingSession: NSObject, @unchecked Sendable {
     /// `urlSession(_:task:didCompleteWithError:)`. That callback is guaranteed
     /// to fire only once the task is allowed to run (`resume()`) and is later
     /// completed, failed, or cancelled — so every path out of this method must
-    /// leave the task reachable by a consumer cancel. Hence:
+    /// leave the task reachable by a consumer cancel.
     ///
-    /// 1. `onTermination` is attached inside the stream builder, BEFORE
-    ///    `resume()`, and reaches the task through a `SendableBox` so the two can
-    ///    be wired up in either order. The old `dataContinuation?.onTermination = …`
-    ///    assignment ran after the response arrived, which was both too late for
-    ///    a consumer that threw or returned before entering the loop, and a
-    ///    silent no-op when a tiny response let the delegate reach `finish()`
-    ///    first (leaving `dataContinuation` nil) — in both cases the task was
-    ///    never cancelled, `didCompleteWithError` never fired, and the session
-    ///    leaked.
-    /// 2. If `stream()` itself is cancelled while waiting for the response, the
-    ///    task is cancelled explicitly: cancellation of the awaiting task does
-    ///    not cancel a bare `URLSessionTask`.
+    /// Four exits must all reach `task.cancel()`, and none of them implies the
+    /// others:
+    ///
+    /// 1. the consumer drops, throws out of, or returns from the chunk loop —
+    ///    covered by `AsyncThrowingStream`'s `CancellationHandler`, which fires
+    ///    when the stream is finished or deallocated. It is installed in the
+    ///    initializer, BEFORE `resume()`; the old `dataContinuation?.onTermination
+    ///    = …` assignment ran after the response arrived, which was too late for a
+    ///    consumer that threw before entering the loop and a silent no-op when a
+    ///    tiny response let the delegate reach `finish()` first (leaving
+    ///    `dataContinuation` nil);
+    /// 2. `stream()` itself is cancelled while awaiting the response headers —
+    ///    covered by `withTaskCancellationHandler`, because cancelling a Swift task
+    ///    never cancels a bare `URLSessionTask`;
+    /// 3. the consumer's *task* is cancelled while suspended inside the loop — the
+    ///    stream object stays alive, so (1) does not fire; and
+    /// 4. a relay `break`s out of the loop while still holding the stream, which
+    ///    neither (1) nor (3) can see either.
+    ///
+    /// Both (3) and (4) are the same shape — "the consumer stopped caring without
+    /// the stream noticing" — and neither can be solved from inside the stream,
+    /// because there is no observable event to hook. They are covered by
+    /// `cancelUpstream()`, the explicit off-consumer cancel, which each call site
+    /// must invoke: `VideoDetailViewModel`'s VLC relay and `AuthProxy`'s
+    /// `processHTTPRequest` both do. `CachingResourceLoader` is exempt: its request
+    /// tasks are cancelled through `activeTasks`, and the task's own `catch` calls
+    /// into the loader path that ends the request.
     func stream(
         request: URLRequest,
         configuration: URLSessionConfiguration
@@ -76,18 +86,23 @@ final class StreamingSession: NSObject, @unchecked Sendable {
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         self.session = session
         let task = session.dataTask(with: request)
-        // The builder runs synchronously inside the `AsyncThrowingStream`
-        // initializer and `box.task` is set immediately after it, both strictly
-        // before `task.resume()`, so `onTermination` can never fire against an
-        // empty box. The indirection exists because `onTermination` has to be
-        // installed before the task is cancellable, while the continuation only
-        // exists inside the builder.
+        // `onTermination` is only settable through
+        // `CancellationHandler` at construction — `AsyncThrowingStream` has no
+        // settable `onTermination` property — and construction happens before the
+        // task can be referenced by name, hence the box: it lets the handler exist
+        // first and be handed the task immediately after, both strictly before
+        // `resume()`. A no-op against an empty box is harmless because the task
+        // cannot be cancellable before `resume()`.
         let box = SendableBox<URLSessionTask?>(nil)
 
-        let dataStream = AsyncThrowingStream<Data, Error> { continuation in
-            continuation.onTermination = { _ in
-                box.cancelContents()
+        let dataStream = AsyncThrowingStream<Data, Error>(
+            Data.self,
+            bufferingPolicy: .unbounded,
+            cancellationHandler: { @Sendable _ in
+                // Lock-guarded read; `URLSessionTask.cancel()` is thread-safe.
+                box.current?.cancel()
             }
+        ) { continuation in
             self.dataContinuation = continuation
         }
         box.set(task)
@@ -101,14 +116,6 @@ final class StreamingSession: NSObject, @unchecked Sendable {
                 }
             } onCancel: {
                 task.cancel()
-            }
-            // The consumer may be cancelled while the response is in flight, and
-            // `AsyncThrowingStream` does not fire `onTermination` on a stream that
-            // was never created or already finished — so the task would run to
-            // `timeoutIntervalForResource = 0` with nobody reading it, and the
-            // delegate-based session would never be invalidated.
-            dataStream.onTermination = { [weak task] _ in
-                task?.cancel()
             }
             return (response, dataStream)
         } catch {
@@ -152,7 +159,6 @@ final class StreamingSession: NSObject, @unchecked Sendable {
         }
         if cancelNow { task.cancel() }
     }
-
 
     // MARK: - URLSessionDataDelegate
 
