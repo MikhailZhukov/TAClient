@@ -238,27 +238,27 @@ struct AuthProxyTests {
     /// never started must not trap.
     @Test func stop_isIdempotent() async throws {
         let proxy = AuthProxy(token: "t", serverBaseURL: URL(string: "https://ta.example.com")!)
-        // `stop()` before `start()` must not trap and must mark the proxy dead.
+        // `stop()` before `start()` must not trap.
         await proxy.stop()
+        // It must also NOT poison the instance: `start()` afterwards is a legal
+        // sequence and binds normally. (An earlier revision of this test asserted the
+        // opposite — that restarting a stopped proxy is refused — which was written
+        // against a design where one `stop()` disabled the tracker permanently. That
+        // design was a bug: it made a fresh instance stopped-before-start un-startable
+        // for life, and the assertion was pinning the bug.)
         try await proxy.start()
+        #expect(await proxy.localPort > 0, "start() after a pre-start stop() must bind")
+
         await proxy.stop()
         await proxy.stop()
         #expect(await proxy.localPort == 0)
-        // A `start()` on a stopped proxy must refuse connections from birth: the
-        // tracker it installs is already shut down, so any peer accepted afterwards
-        // is cancelled instead of served. `AcceptedConnections` is app-target
-        // internal, so the seam reports the tracker's shutdown state as a count of
-        // -1 (absent) vs. its live count; shutdown-ness is asserted via `stop()`
-        // dropping the tracker, and the refuse-from-birth path is covered by
-        // `stop_cancelsInFlightConnections`.
-        let stopped = AuthProxy(token: "t", serverBaseURL: URL(string: "https://ta.example.com")!)
-        await stopped.stop()
-        try? await stopped.start()
-        // Restarting a stopped proxy is refused, so no tracker is ever created.
-        #expect(await stopped.trackedConnectionCountForTests() == -1,
-                "a stopped proxy must not serve a live tracker")
 
-        // A fresh proxy that was never started has no tracker either.
+        // What the idempotency guard still guarantees after the poison fix: the proxy
+        // is dead once stopped, and its tracker is gone rather than left live.
+        #expect(await proxy.trackedConnectionCountForTests() == -1,
+                "stop() must drop the tracker")
+
+        // A fresh proxy that was never started has no tracker.
         let fresh = AuthProxy(token: "t", serverBaseURL: URL(string: "https://ta.example.com")!)
         #expect(await fresh.trackedConnectionCountForTests() == -1, "no tracker before start()")
     }

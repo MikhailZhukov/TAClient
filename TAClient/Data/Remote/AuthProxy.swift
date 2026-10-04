@@ -668,6 +668,15 @@ nonisolated final class AuthProxyLease: @unchecked Sendable {
         /// stops it only if that task ends without doing so. The task itself is not
         /// carried in the case payload — see `adopt(installedBy:)`.
         case adopted
+        /// `takeForExternalStop()` handed the proxy to a taker (a `deinit`) that runs
+        /// the stop itself, so the lease has no task of its own and nothing to join.
+        ///
+        /// A distinct state rather than `.stopping` with a placeholder task, because
+        /// that placeholder was an immediately-complete `Task {}` and `awaitStopping()`
+        /// spun on it forever: await it, re-read, see the same placeholder, await
+        /// again. A no-op task is not a substitute for "there is nothing here to
+        /// await", and the type now says so instead of lying with a finished task.
+        case claimedExternally
     }
 
     private let lock = NSLock()
@@ -688,6 +697,8 @@ nonisolated final class AuthProxyLease: @unchecked Sendable {
     /// `true` while a stop has been dispatched but not confirmed.
     var isStoppingOrStopped: Bool {
         lock.withLock {
+            // `.claimedExternally` counts: the stop is owned and dispatched by the
+            // taker, so no second stop should be started for this socket.
             if case .pending = _state { return false }
             return true
         }
@@ -708,13 +719,15 @@ nonisolated final class AuthProxyLease: @unchecked Sendable {
         //   `.stopping`, or `awaitStopping()` returns without joining anything;
         // - the critical section must not call out to code we do not own.
         //
-        // So the task is built after the claim, but the claim is expressed as
-        // `_stoppingTask = placeholder` FIRST and overwritten immediately, which
-        // keeps the first invariant. `Task.init` only schedules — it does not run
-        // the body — so the placeholder is never awaited for real work.
+        // So the task is built after the claim. The gap between the two is closed by
+        // `awaitStopping()` treating `.stopping`-with-nil-task as "not installed yet"
+        // and re-reading, exactly as it does for `.adopted` — NOT by a placeholder
+        // task. A placeholder (`Task {}`) is immediately complete, so a waiter would
+        // await it, re-read, still see it, and spin; and if the real task were ever
+        // installed after a waiter had passed the re-read, the waiter would have
+        // already returned "done" for a stop that had not run.
         let claim: (any AuthProxyConsumeProtocol)? = lock.withLock {
             guard case .pending = _state else { return nil }
-            _stoppingTask = Task<Void, Never> { }
             _state = .stopping
             let claimed = proxy
             // The lease stops owning the proxy reference the moment the stop is
@@ -746,37 +759,59 @@ nonisolated final class AuthProxyLease: @unchecked Sendable {
     func adopt(installedBy task: Task<Void, Never>) {
         let adopted: Task<Void, Never>? = lock.withLock {
             guard case .pending = _state else { return nil }
-            // Placeholder BEFORE flipping the state, exactly as in `startStopping()`.
-            // Without it there is an observable window where the state is `.adopted`
-            // and `_stoppingTask` is nil, and `awaitStopping()` treats a nil task as
-            // "nobody claimed the lease" and returns immediately — so a caller waiting
-            // for "the socket is released" is told "done" while the socket is still
-            // bound. That window is not merely a test-observability problem: it is how
-            // an adopted lease silently never stops at all.
-            _stoppingTask = Task<Void, Never> { }
             _state = .adopted
             return task
         }
         guard let adopted else { return }
+        // Built BEFORE the state is observable as adopted-without-a-task, and installed
+        // under the same lock that later reads it. The watcher is created outside the
+        // lock (a critical section must not call code we do not own) but `Task.init`
+        // only schedules, so nothing runs before the install below.
         let watcher = Task { [weak self] in
             _ = await adopted.value
-            // Give the owning task's own `stop()` a chance to land on the actor
-            // first, so a normal handoff does not queue a redundant stop.
+            // Give the owning task's own `stop()` a chance to land on the actor first,
+            // so a normal handoff does not queue a redundant stop.
             try? await Task.sleep(for: .milliseconds(100))
             self?.startStopping()
         }
-        lock.withLock { if case .adopted = _state { _stoppingTask = watcher } }
+        // Unconditional install, NOT `if case .adopted`. This was the deadlock: the
+        // watcher's body can run to completion on another thread before this line
+        // executes — it awaits nothing but the already-finished owner task plus a
+        // sleep — and its `startStopping()` moves the state to `.stopping`. The old
+        // conditional then refused to install, so `_stoppingTask` kept holding the
+        // PLACEHOLDER from the claim, and `awaitStopping()` awaited that no-op forever
+        // while the real stop task sat unreachable. Installing the watcher
+        // unconditionally is safe because it is a strict superset of the placeholder's
+        // job: awaiting it covers both "watcher still waiting" and "watcher already
+        // dispatched the stop", and `awaitStopping()` re-reads to pick up whichever
+        // task is current.
+        lock.withLock {
+            switch _state {
+            case .adopted:
+                _stoppingTask = watcher
+            case .stopping:
+                // The watcher already won and dispatched. Keep the real stop task — it
+                // is strictly the later, more informative thing to join.
+                break
+            default:
+                break
+            }
+        }
     }
 
     /// Take the lease away from its owner so a `deinit` can finish the stop
     /// itself. Returns `nil` when the stop is already dispatched or completed —
     /// i.e. when there is nothing left for a taker to do.
     ///
-    /// The claim also installs a no-op `_stoppingTask`, so a concurrent
-    /// `awaitStopping()` joins something that completes rather than observing
-    /// `.stopping` with an empty slot and returning early — a caller waiting for
-    /// "the socket is released" would otherwise be told "done" while an external
-    /// stop is still in flight. The taker owns the real stop.
+    /// The claim moves the lease to `.claimedExternally`, which `awaitStopping()`
+    /// reports as "nothing on this lease to join" — the taker owns the stop and the
+    /// lease genuinely holds no task for it. The previous design installed a no-op
+    /// task to make a concurrent waiter return promptly; that inverted the failure
+    /// mode and hung the waiter forever instead (see the state's comment).
+    ///
+    /// A caller that must wait for the socket belongs to the taker, not the lease:
+    /// `deinit` cannot await at all, which is why it takes the proxy and stops it on
+    /// a detached task it owns.
     func takeForExternalStop() -> (any AuthProxyConsumeProtocol)? {
         lock.withLock {
             guard case .pending = _state else {
@@ -785,8 +820,8 @@ nonisolated final class AuthProxyLease: @unchecked Sendable {
             }
             let taken = proxy
             proxy = nil
-            _stoppingTask = Task<Void, Never> { }
-            _state = .stopping
+            _stoppingTask = nil
+            _state = .claimedExternally
             return taken
         }
     }
@@ -801,26 +836,28 @@ nonisolated final class AuthProxyLease: @unchecked Sendable {
     func awaitStopping() async {
         while true {
             let snapshot = lock.withLock { (state: _state, task: _stoppingTask) }
-            if case .stopped = snapshot.state { return }
-            // `.pending` with no task: nobody has claimed the lease. Nothing to
-            // join — the owner (or `deinit`) still owes the stop.
-            //
-            // `.adopted` is NOT in that category, and returning early there is the
-            // bug this branch would otherwise ship with: an adopted lease has an
-            // outstanding obligation (the owner task, then the backstop stop), so a
-            // nil task means "the watcher has not been installed yet", never "there
-            // is nothing to do". Yield and re-read instead of declaring the socket
-            // released while it is still bound.
-            if case .pending = snapshot.state, snapshot.task == nil { return }
-            guard let task = snapshot.task else {
-                try? await Task.sleep(for: .milliseconds(5))
-                continue
+            switch snapshot.state {
+            case .stopped:
+                return
+            case .pending, .claimedExternally:
+                // Nothing on this lease to join: `.pending` means the owner (or
+                // `deinit`) still owes the stop, `.claimedExternally` means a taker
+                // owns it and the lease holds no task.
+                return
+            case .adopted, .stopping:
+                // Both have an outstanding obligation. A nil task here means the
+                // task has not been installed yet — never "there is nothing to do" —
+                // so yield and re-read rather than reporting a bound socket released.
+                guard let task = snapshot.task else {
+                    try? await Task.sleep(for: .milliseconds(5))
+                    continue
+                }
+                await task.value
+                // Re-read: an adopted watcher ends by calling `startStopping()`, which
+                // replaces `_stoppingTask` with the real stop task. Termination is
+                // structural, not assumed: every pass either returns or awaits, and the
+                // state only ever advances toward `.stopped`.
             }
-            await task.value
-            // Loop re-reads: an adopted watcher ends by calling `startStopping()`,
-            // which installs the REAL stop task in `_stoppingTask`. The loop exits
-            // on `.stopped`, so it cannot spin — every pass either returns or
-            // awaits a strictly later task.
         }
     }
 
