@@ -255,12 +255,42 @@ actor AuthProxy {
             listener.cancel()
             throw AppError.unknown(message: "AuthProxy failed to bind")
         }
-        // A `stop()` that landed while `start()` was polling has already
-        // cancelled this listener; do not hand a dead socket back to the caller
-        // (and do not reinstall a state handler on it).
+        // A `stop()` that landed while `start()` was polling has already cancelled
+        // this listener; do not hand a dead socket back to the caller (and do not
+        // reinstall a state handler on it).
+        //
+        // Releasing `accepted` here is mandatory: line ~187 installed it into
+        // `self.acceptedConnections` BEFORE the poll, and `stop()`'s own teardown ran
+        // while `start()` was still suspended, so the tracker assigned at 187 is
+        // still sitting in the property with nobody left to shut it down. Throwing
+        // without clearing it leaked the tracker (and any peer the listener accepted
+        // during the bind window) on exactly this path.
         guard !isStopped else {
+            accepted.shutdown()
+            if acceptedConnections === accepted { acceptedConnections = nil }
+            listener.stateUpdateHandler = nil
+            listener.cancel()
             throw AppError.unknown(message: "AuthProxy stopped while starting")
         }
+
+        // The bind succeeded and this generation owns the socket, so the proxy is
+        // live again. `isStopped` is cleared HERE — after the post-poll guard, not at
+        // the top of `start()` — because the two placements are not equivalent:
+        //
+        // - clearing at entry would let a `stop()` arriving during the bind be
+        //   swallowed by `stop()`'s own `guard !isStopped else { return }`, so the
+        //   freshly bound listener would never be cancelled: a silent leak, and the
+        //   exact class of bug this branch exists to close;
+        // - clearing after the guard means a `stop()` during the bind sets the flag,
+        //   the guard above sees it and unwinds the socket, and `stop()` itself was
+        //   never suppressed.
+        //
+        // This is what makes `stop()`-then-`start()` legal on a fresh instance (the
+        // sequence `stop_isIdempotent` drives). It does not weaken the resurrection
+        // guard the property documents: a stale `.failed` from the PREVIOUS listener
+        // can only arrive while `start()` is between the guard and installing the new
+        // handler, and `restartListener()` is separately guarded on `listener != nil`.
+        isStopped = false
 
         // Monitor listener state after start.
         //

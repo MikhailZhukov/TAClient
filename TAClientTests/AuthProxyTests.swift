@@ -98,13 +98,26 @@ struct AuthProxyTests {
         #expect(await proxy.trackedConnectionCountForTests() == -1,
                 "stop() must drop the tracker entirely (-1 == no tracker)")
 
-        // `NWConnection.cancel()` is async; poll briefly for the terminal state.
+        // What `stop()` can cancel is the LISTENER-SIDE connection it accepted, and
+        // that is what the tracker holds. `connection` here is the test's own
+        // CLIENT-side peer — a different NWConnection object on the other end of the
+        // same socket. `stop()` cancelling the accepted side tears the socket down but
+        // never transitions the client side to `.cancelled`: the framework reports it
+        // as `.waiting`/`.failed` (peer closed), never `.cancelled`, because nobody
+        // called `cancel()` on it. Asserting `.cancelled` on the peer was asserting
+        // something the product neither does nor can do.
+        //
+        // The product guarantee is "the accepted socket is cancelled and released",
+        // which the two tracker assertions above already pin (count == -1 == tracker
+        // gone, and it was 1 before). The peer's own terminal state is asserted only
+        // as "it stopped being `.ready`", i.e. the socket really went away.
         var observed = connection.state
-        for _ in 0..<100 where observed != .cancelled {
+        for _ in 0..<100 where observed == .ready {
             try await Task.sleep(for: .milliseconds(20))
             observed = connection.state
         }
-        #expect(observed == .cancelled, "stop() must cancel in-flight connections (state: \(observed))")
+        #expect(observed != .ready,
+                "the socket must not survive stop() (peer still reports \(observed))")
         connection.cancel()
     }
 

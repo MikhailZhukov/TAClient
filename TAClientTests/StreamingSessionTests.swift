@@ -299,35 +299,43 @@ extension DataLayerSuite {
         }
 
         weak var weakStreamer: StreamingSession?
-        let streamer = StreamingSession()
-        weakStreamer = streamer
-        let (_, stream) = try await streamer.stream(
-            request: makeRequest(),
-            configuration: makeConfig()
-        )
-        // Read exactly one chunk so the request is genuinely in flight, then
-        // cancel from "outside" while keeping `stream` alive.
-        var iterator = stream.makeAsyncIterator()
-        _ = try await iterator.next()
-
-        streamer.cancelUpstream()
-        streamer.cancelUpstream()  // idempotent
-
-        // The stream must terminate (with a cancellation error) rather than keep
-        // yielding the remaining ~1.5 s of chunks.
         var receivedAfterCancel = 0
+        // Scoped so the session's only remaining strong reference after the block is
+        // URLSession's retain on its delegate — the leak this test is about. Swift
+        // keeps a local alive to the end of its lexical scope, so declaring the
+        // session at function scope makes `weakStreamer == nil` unachievable no matter
+        // what the product does. Every passing leak test in this file uses this
+        // `do {}` shape for exactly that reason; these two did not.
         do {
-            while try await iterator.next() != nil {
-                receivedAfterCancel += 1
+            let streamer = StreamingSession()
+            weakStreamer = streamer
+            let (_, stream) = try await streamer.stream(
+                request: makeRequest(),
+                configuration: makeConfig()
+            )
+            // Read exactly one chunk so the request is genuinely in flight, then
+            // cancel from "outside" while keeping `stream` alive.
+            var iterator = stream.makeAsyncIterator()
+            _ = try await iterator.next()
+
+            streamer.cancelUpstream()
+            streamer.cancelUpstream()  // idempotent
+
+            // The stream must terminate (with a cancellation error) rather than keep
+            // yielding the remaining ~1.5 s of chunks.
+            do {
+                while try await iterator.next() != nil {
+                    receivedAfterCancel += 1
+                }
+            } catch {
+                // Expected: URLError.cancelled.
             }
-        } catch {
-            // Expected: URLError.cancelled.
+            // Keep a strong ref until here so "the stream was never dropped" is true.
+            withExtendedLifetime(stream) {}
         }
         #expect(receivedAfterCancel == 0,
                 "upstream kept delivering after cancelUpstream (\(receivedAfterCancel) extra chunks)")
 
-        // Keep a strong ref until here so "the stream was never dropped" is true.
-        withExtendedLifetime(stream) {}
         try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
         #expect(weakStreamer == nil, "StreamingSession leaked after cancelUpstream")
     }
@@ -348,19 +356,24 @@ extension DataLayerSuite {
         }
 
         weak var weakStreamer: StreamingSession?
-        let streamer = StreamingSession()
-        weakStreamer = streamer
-        streamer.cancelUpstream()
-
+        // Scoped for the same reason as the test above: the session must be released
+        // by the end of the block so that URLSession's retain on its delegate is the
+        // only thing that could still be holding it.
         do {
-            let (_, stream) = try await streamer.stream(
-                request: makeRequest(),
-                configuration: makeConfig()
-            )
-            // Already cancelled: at most the bytes already buffered, then an end.
-            for try await _ in stream {}
-        } catch {
-            // Expected: the pre-cancelled task fails immediately.
+            let streamer = StreamingSession()
+            weakStreamer = streamer
+            streamer.cancelUpstream()
+
+            do {
+                let (_, stream) = try await streamer.stream(
+                    request: makeRequest(),
+                    configuration: makeConfig()
+                )
+                // Already cancelled: at most the bytes already buffered, then an end.
+                for try await _ in stream {}
+            } catch {
+                // Expected: the pre-cancelled task fails immediately.
+            }
         }
 
         try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
