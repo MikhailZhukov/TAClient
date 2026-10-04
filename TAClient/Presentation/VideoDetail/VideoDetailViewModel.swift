@@ -884,15 +884,23 @@ final class VideoDetailViewModel {
         // `pending` there can hand ownership to a task that already finished, leaving
         // an installed proxy stopped by nobody.
         //
-        // The guard is `isCompleted`, NOT task identity: `Task` is not
-        // class-constrained, so `bindTask === bind` does not compile (this exact
-        // mistake is what CLAUDE.md warns about). `bind` is by construction the task
-        // this call just assigned at `bindTask = bind`, and no other code path assigns
-        // `bindTask` except `cancelProxyStart()` (nils it) and a newer
-        // `startAuthProxy()` (which bumps `proxyGeneration`). So: clear the slot when
-        // it is finished — which, for this handoff's own task, is always true here —
-        // and leave it alone if a newer handoff is genuinely still running.
-        if bindTask?.isCompleted ?? true { bindTask = nil }
+        // Unconditional is correct here, and no completion check is needed or
+        // possible: `await bind.value` above has already returned, so this handoff's
+        // task is necessarily finished by the time control reaches this line.
+        //
+        // There is deliberately no guard on it, for three reasons established the hard
+        // way in this branch:
+        // - `Task` is not class-constrained, so `bindTask === bind` does not compile;
+        // - `Task` has no `isCompleted`/`isFinished` member (the `isFinished` elsewhere
+        //   in this file is `URLRequest`'s), so completion cannot be probed at all;
+        // - `cancelProxyStart()` nils `bindTask`, so any identity-shaped check would be
+        //   false exactly on the abandoned path that most needs the clear.
+        //
+        // A newer handoff cannot be clobbered: `startAuthProxy` runs on the MainActor,
+        // and between `await bind.value` returning and this line there is no
+        // suspension, so no other `startAuthProxy` can have installed its task in
+        // between. A successor can only begin after this method returns.
+        bindTask = nil
         if pendingProxyAbandon === abandoned { pendingProxyAbandon = nil }
         bindTaskBox.set(nil)
         return installed
