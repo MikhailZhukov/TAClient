@@ -195,12 +195,12 @@ extension DataLayerSuite {
         // Bounded so an ignored cancellation fails the test instead of hanging the
         // suite for the URLSession's 60 s request timeout.
         let threw = await withTaskGroup(of: Bool?.self) { group in
-            // `try?` rather than propagating: a stream cancellation here is the
-            // outcome under test, and `withTaskGroup` would rethrow it out of the
-            // helper. The task's own `catch` already maps it to `true`, so the
-            // `nil` this yields on a throw is unreachable in practice — it just
-            // keeps the group's element type (`Bool?`) honest.
-            group.addTask { try? await task.value }
+            // No `try`: the task's closure is non-throwing (it catches its own
+            // errors), so `Failure == Never` and `Task.value` does not throw here.
+            // The earlier `try?` was dead weight and the compiler said so. The `nil`
+            // in the group's element type is only ever produced by the sibling
+            // timeout task, which is what makes the race below decidable.
+            group.addTask { await task.value }
             group.addTask {
                 try? await Task.sleep(for: .seconds(10))
                 return nil
@@ -268,15 +268,11 @@ extension DataLayerSuite {
         task.cancel()
         // The join that proves the consumer finished — and its
         // `defer { cancelUpstream() }` ran — before the weak reference is checked.
+        // No `try`: this closure is non-throwing, so `Failure == Never`.
         //
-        // `try` is required even though the closure is non-throwing: `Task.value` is
-        // a `rethrows` property, and Swift demands `try` at any await of it whose
-        // failure type is not statically `Never`. This task's closure catches its own
-        // errors, so `Success`/`Failure` are `Void`/`Never` and the call can never
-        // actually throw. `try?` is the honest spelling: it satisfies the checker
-        // without pretending a throw is expected, and dropping the await entirely
-        // would race the leak assertion below.
-        _ = try? await task.value
+        // The await itself is load-bearing and must not be "cleaned up": it is what
+        // orders the leak assertion below after the consumer's teardown.
+        _ = await task.value
 
         #expect(iterations.current >= 1, "the consumer should have started reading")
         try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
