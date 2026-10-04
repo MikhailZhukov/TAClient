@@ -150,6 +150,19 @@ actor AuthProxy {
     /// `NWListener.cancel()` is asynchronous, so that callback really can land
     /// after `stop()` has already returned.
     private var isStopped = false
+    /// Bumped by `stop()`. A `start()` captures this at entry and compares after the
+    /// bind poll, so it can tell "a `stop()` targeted the socket I am producing" from
+    /// "this proxy was already dead when I began".
+    ///
+    /// Needed because a boolean cannot express that difference, and the two cases need
+    /// opposite handling:
+    /// - stopped BEFORE this `start()` began (e.g. `stop()` on a fresh instance, then
+    ///   `start()`): the stale flag must not veto a brand-new bind — that made a
+    ///   never-started proxy permanently un-startable;
+    /// - stopped DURING this `start()`'s poll: the new listener must be unwound, or it
+    ///   stays bound with the token inside it and nobody will ever cancel it.
+    /// `isStopped` alone reads identically in both cases.
+    private var stopGeneration = 0
     /// Shutdown flag plus the set of connections accepted by the current
     /// listener. `stop()` flips it and cancels everything still in flight, so
     /// no per-request streaming task survives the proxy that authorised it.
@@ -170,6 +183,9 @@ actor AuthProxy {
     }
 
     func start() async throws {
+        // Captured before anything can suspend, so a `stop()` during the poll is
+        // detectable as a CHANGE rather than inferred from a flag that may predate us.
+        let startedAtGeneration = stopGeneration
         let params = NWParameters.tcp
         #if !targetEnvironment(simulator)
         // The simulator's host network stack rejects even 127.0.0.1 peers under
@@ -178,12 +194,13 @@ actor AuthProxy {
         #endif
         let listener = try NWListener(using: params, on: .any)
 
-        // A restart re-enters `start()` after `restartListener()` shut the
-        // previous tracker down; inheriting that shutdown flag would make the
-        // freshly bound listener refuse every connection. A first `start()` on a
-        // proxy that was already stopped keeps the flag set, so its handler
-        // refuses connections until the (cancelled) bind resolves.
-        let accepted = AcceptedConnections(isShutdown: isStopped)
+        // Always born UNSHUT down. The previous behaviour — inherit `isStopped` — was
+        // how "stopped before ever starting" poisoned a fresh tracker: a proxy stopped
+        // once would refuse every connection for the rest of its life, and there is no
+        // path that clears it. A tracker that outlives its bind is guarded instead by
+        // the `stopGeneration` check below, which unwinds the tracker on every failure
+        // path, so nothing unrefusable can escape.
+        let accepted = AcceptedConnections(isShutdown: false)
         self.acceptedConnections = accepted
 
         listener.newConnectionHandler = { [weak self, accepted] connection in
@@ -252,6 +269,11 @@ actor AuthProxy {
         guard !Task.isCancelled, assignedPort > 0 else {
             listener.stateUpdateHandler = nil
             accepted.shutdown()
+            // Same orphan this branch fixed for the stopped-during-start path:
+            // `accepted` was installed into the property before the poll, so every
+            // throw out of here must release it or it stays reachable with its
+            // shutdown flag set and no live listener behind it.
+            if acceptedConnections === accepted { acceptedConnections = nil }
             listener.cancel()
             throw AppError.unknown(message: "AuthProxy failed to bind")
         }
@@ -265,7 +287,7 @@ actor AuthProxy {
         // still sitting in the property with nobody left to shut it down. Throwing
         // without clearing it leaked the tracker (and any peer the listener accepted
         // during the bind window) on exactly this path.
-        guard !isStopped else {
+        guard stopGeneration == startedAtGeneration else {
             accepted.shutdown()
             if acceptedConnections === accepted { acceptedConnections = nil }
             listener.stateUpdateHandler = nil
@@ -273,24 +295,13 @@ actor AuthProxy {
             throw AppError.unknown(message: "AuthProxy stopped while starting")
         }
 
-        // The bind succeeded and this generation owns the socket, so the proxy is
-        // live again. `isStopped` is cleared HERE — after the post-poll guard, not at
-        // the top of `start()` — because the two placements are not equivalent:
-        //
-        // - clearing at entry would let a `stop()` arriving during the bind be
-        //   swallowed by `stop()`'s own `guard !isStopped else { return }`, so the
-        //   freshly bound listener would never be cancelled: a silent leak, and the
-        //   exact class of bug this branch exists to close;
-        // - clearing after the guard means a `stop()` during the bind sets the flag,
-        //   the guard above sees it and unwinds the socket, and `stop()` itself was
-        //   never suppressed.
-        //
-        // This is what makes `stop()`-then-`start()` legal on a fresh instance (the
-        // sequence `stop_isIdempotent` drives). It does not weaken the resurrection
-        // guard the property documents: a stale `.failed` from the PREVIOUS listener
-        // can only arrive while `start()` is between the guard and installing the new
-        // handler, and `restartListener()` is separately guarded on `listener != nil`.
-        isStopped = false
+        // The bind succeeded and this generation owns the socket. `isStopped` is
+        // deliberately left alone: it now means only "a torn-down listener's late
+        // `.failed` must not resurrect the proxy" (see its declaration), and the
+        // stopped-vs-stopping distinction the guard above needed is carried by
+        // `stopGeneration`. Clearing it here was my previous attempt and it was wrong
+        // in both directions — it ran after the guard that consumed it, and it
+        // discarded the resurrection guard for a proxy that had genuinely been stopped.
 
         // Monitor listener state after start.
         //
@@ -340,6 +351,10 @@ actor AuthProxy {
     }
 
     func stop() {
+        // Bumped BEFORE the idempotency guard's body, and unconditionally paired with
+        // `isStopped`, so any `start()` in flight sees the change even when this call
+        // is the second/no-op one for a given generation.
+        stopGeneration += 1
         guard !isStopped else { return }
         isStopped = true
         // Cancel in-flight request handlers before the listener. Each handler
@@ -731,6 +746,14 @@ nonisolated final class AuthProxyLease: @unchecked Sendable {
     func adopt(installedBy task: Task<Void, Never>) {
         let adopted: Task<Void, Never>? = lock.withLock {
             guard case .pending = _state else { return nil }
+            // Placeholder BEFORE flipping the state, exactly as in `startStopping()`.
+            // Without it there is an observable window where the state is `.adopted`
+            // and `_stoppingTask` is nil, and `awaitStopping()` treats a nil task as
+            // "nobody claimed the lease" and returns immediately — so a caller waiting
+            // for "the socket is released" is told "done" while the socket is still
+            // bound. That window is not merely a test-observability problem: it is how
+            // an adopted lease silently never stops at all.
+            _stoppingTask = Task<Void, Never> { }
             _state = .adopted
             return task
         }
@@ -781,7 +804,18 @@ nonisolated final class AuthProxyLease: @unchecked Sendable {
             if case .stopped = snapshot.state { return }
             // `.pending` with no task: nobody has claimed the lease. Nothing to
             // join — the owner (or `deinit`) still owes the stop.
-            guard let task = snapshot.task else { return }
+            //
+            // `.adopted` is NOT in that category, and returning early there is the
+            // bug this branch would otherwise ship with: an adopted lease has an
+            // outstanding obligation (the owner task, then the backstop stop), so a
+            // nil task means "the watcher has not been installed yet", never "there
+            // is nothing to do". Yield and re-read instead of declaring the socket
+            // released while it is still bound.
+            if case .pending = snapshot.state, snapshot.task == nil { return }
+            guard let task = snapshot.task else {
+                try? await Task.sleep(for: .milliseconds(5))
+                continue
+            }
             await task.value
             // Loop re-reads: an adopted watcher ends by calling `startStopping()`,
             // which installs the REAL stop task in `_stoppingTask`. The loop exits
@@ -809,6 +843,11 @@ extension AuthProxyLease {
     var hasPendingTeardown: Bool {
         lock.withLock {
             if case .pending = _state { return proxy != nil }
+            // `.adopted` is deliberately NOT reported as pending: the lease is not
+            // waiting for a `deinit` to take over — it has an owner task and a
+            // backstop watcher that will fire. Reporting it pending would invite a
+            // `deinit` to take a lease that already has a dispatcher, giving one
+            // socket two owners. `.stopping`/`.stopped` are likewise not pending.
             return false
         }
     }

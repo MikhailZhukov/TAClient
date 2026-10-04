@@ -98,26 +98,29 @@ struct AuthProxyTests {
         #expect(await proxy.trackedConnectionCountForTests() == -1,
                 "stop() must drop the tracker entirely (-1 == no tracker)")
 
-        // What `stop()` can cancel is the LISTENER-SIDE connection it accepted, and
-        // that is what the tracker holds. `connection` here is the test's own
-        // CLIENT-side peer — a different NWConnection object on the other end of the
-        // same socket. `stop()` cancelling the accepted side tears the socket down but
-        // never transitions the client side to `.cancelled`: the framework reports it
-        // as `.waiting`/`.failed` (peer closed), never `.cancelled`, because nobody
-        // called `cancel()` on it. Asserting `.cancelled` on the peer was asserting
-        // something the product neither does nor can do.
+        #expect(await proxy.localPort == 0, "stop() must release the port")
+
+        // What the peer's `NWConnection.state` can and cannot tell us.
         //
-        // The product guarantee is "the accepted socket is cancelled and released",
-        // which the two tracker assertions above already pin (count == -1 == tracker
-        // gone, and it was 1 before). The peer's own terminal state is asserted only
-        // as "it stopped being `.ready`", i.e. the socket really went away.
-        var observed = connection.state
-        for _ in 0..<100 where observed == .ready {
-            try await Task.sleep(for: .milliseconds(20))
-            observed = connection.state
-        }
-        #expect(observed != .ready,
-                "the socket must not survive stop() (peer still reports \(observed))")
+        // `connection` is the test's CLIENT-side peer. The tracker — and therefore
+        // `stop()` — holds the LISTENER-side connection the listener accepted: a
+        // different NWConnection object on the far end of the same socket. So the
+        // peer's state is not an observable of what `stop()` did:
+        //   - it can never become `.cancelled`, because nobody calls `cancel()` on it;
+        //   - it can legitimately stay `.ready` even after the far end is closed,
+        //     because a TCP client with no I/O outstanding has no reason to notice.
+        //     Reading a closed peer is what surfaces it (as `.waiting`/`.failed`), and
+        //     polling `state` performs no I/O. Asserting on it was wrong twice over —
+        //     first for `.cancelled`, then for `!= .ready`.
+        //
+        // The guarantee that matters is behavioural: after `stop()` the socket must
+        // not serve another request. That is the leak this branch exists for (a relay
+        // that keeps streaming, holding the user's token), and it is what the peer is
+        // actually useful for — as a client that tries to keep using the proxy.
+        let served = await TrySendThroughStoppedProxy.send(connection)
+        #expect(!served,
+                "a stopped proxy must not serve a request on a connection it accepted before stopping")
+
         connection.cancel()
     }
 
@@ -279,4 +282,54 @@ struct AuthProxyTests {
     }
 }
 
+/// Writes a request down the test's peer connection and reports whether anything
+/// came back. Used by `stop_cancelsInFlightConnections` because the peer's
+/// `NWConnection.state` is not an observable of the LISTENER-side cancel (see the
+/// comment there): the only way to see that a stopped proxy stopped serving is to
+/// ask it to serve.
+///
+/// Returns `false` on write failure, read failure, close, or timeout — every one of
+/// those is a correct outcome for a stopped proxy. A `true` means the proxy answered
+/// after `stop()`, which is the leak.
+enum TrySendThroughStoppedProxy {
+    static func send(_ connection: NWConnection) async -> Bool {
+        // The connection is only guaranteed to have been started by the listener on
+        // ITS side; the test's peer was started by the seam. Re-affirm, since a
+        // connection that never reached `.ready` cannot answer either way.
+        let request = "GET /nope HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        let answered = SendableBox<Bool>(false)
+        let done = SendableBox<Bool>(false)
+        let queue = DispatchQueue(label: "AuthProxyTests.stoppedProxyProbe")
 
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .failed, .cancelled, .waiting:
+                done.set(true)
+            default:
+                break
+            }
+        }
+        connection.send(content: Data(request.utf8), completion: .contentProcessed { error in
+            if error != nil {
+                done.set(true)
+                return
+            }
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, isComplete, err in
+                if err == nil, let data, !data.isEmpty {
+                    answered.set(true)
+                }
+                if isComplete || err != nil {
+                    done.set(true)
+                }
+            }
+        })
+
+        // Bounded wait, mirroring the seam's own style: elapsed-vs-total rather than
+        // Date arithmetic, so the exit condition reads as what it is.
+        let started = Date()
+        while !done.current && Date().timeIntervalSince(started) < 1.5 {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return answered.current
+    }
+}
