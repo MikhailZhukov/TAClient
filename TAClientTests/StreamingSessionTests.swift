@@ -272,7 +272,7 @@ extension DataLayerSuite {
         //
         // The await itself is load-bearing and must not be "cleaned up": it is what
         // orders the leak assertion below after the consumer's teardown.
-        _ = await task.value
+        _ = try? await task.value
 
         #expect(iterations.current >= 1, "the consumer should have started reading")
         try await waitUntilNil({ weakStreamer }, timeout: .seconds(5))
