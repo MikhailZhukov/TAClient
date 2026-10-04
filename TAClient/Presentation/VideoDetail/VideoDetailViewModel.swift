@@ -873,6 +873,26 @@ final class VideoDetailViewModel {
         if installed != nil, proxyOwnerGeneration == generation {
             proxyOwnerGeneration = nil
         }
+        // Release the bind slot. `cancelProxyStart()` already nils it on the
+        // abandoned path; this covers the normal completion path, and without it a
+        // FINISHED task stays parked in `bindTask` for the ViewModel's whole life.
+        //
+        // That staleness is not cosmetic. `pendingProxyStartForTests` reports
+        // `bindTask != nil`, so a completed handoff keeps claiming a bind is in
+        // flight; and `stopAuthProxy()` snapshots `let pending = bindTask` to decide
+        // whether a bind owns the socket it is about to stop — a stale non-nil
+        // `pending` there can hand ownership to a task that already finished, leaving
+        // an installed proxy stopped by nobody.
+        //
+        // The guard is `isCompleted`, NOT task identity: `Task` is not
+        // class-constrained, so `bindTask === bind` does not compile (this exact
+        // mistake is what CLAUDE.md warns about). `bind` is by construction the task
+        // this call just assigned at `bindTask = bind`, and no other code path assigns
+        // `bindTask` except `cancelProxyStart()` (nils it) and a newer
+        // `startAuthProxy()` (which bumps `proxyGeneration`). So: clear the slot when
+        // it is finished — which, for this handoff's own task, is always true here —
+        // and leave it alone if a newer handoff is genuinely still running.
+        if bindTask?.isCompleted ?? true { bindTask = nil }
         if pendingProxyAbandon === abandoned { pendingProxyAbandon = nil }
         bindTaskBox.set(nil)
         return installed
@@ -947,6 +967,17 @@ final class VideoDetailViewModel {
 
     func startAuthProxyForTests(_ proxy: any AuthProxyConsumeProtocol) async -> (any AuthProxyConsumeProtocol)? {
         await startAuthProxy(proxy)
+    }
+
+    /// `proxiedURL(for:token:forAirPlay:)` unchanged. Needed by the reuse test,
+    /// because reuse lives in that method's `if let existing = authProxy` guard and
+    /// cannot be exercised through `startAuthProxy` (which is the unconditional
+    /// bind-this-proxy primitive). Adds no behaviour and no parameter: the proxy the
+    /// test expects to be avoided is injected via the existing settable
+    /// `proxyFactory`, so a regression that consulted the factory is observable as a
+    /// factory call rather than needing a spare-proxy argument here.
+    func proxiedURLForTests(_ url: URL, token: String, forAirPlay: Bool) async -> URL? {
+        await proxiedURL(for: url, token: token, forAirPlay: forAirPlay)
     }
 
     func cancelProxyStartForTests() {

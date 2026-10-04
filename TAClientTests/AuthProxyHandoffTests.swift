@@ -187,29 +187,70 @@ struct AuthProxyHandoffTests {
 
     // MARK: - Success path
 
-    @Test("successful bind installs the proxy and is reused, not rebound")
-    func successfulBindInstallsOnce() async throws {
+    @Test("successful bind installs the proxy")
+    func successfulBindInstalls() async throws {
         let vm = makeViewModel()
         let first = FakeAuthProxy(bindDelay: .milliseconds(20))
-        let second = FakeAuthProxy(bindDelay: .milliseconds(20))
 
         #expect(await vm.startAuthProxyForTests(first) != nil)
         #expect(vm.installedProxyForTests === first)
-
-        // A caller that arrives while a proxy is installed must reuse it: the
-        // pre-fix code could bind a second listener and throw one away.
-        #expect(await vm.startAuthProxyForTests(second) != nil)
-        #expect(await second.startCount == 0, "an installed proxy must be reused, not rebound")
-        #expect(vm.installedProxyForTests === first)
+        #expect(await first.startCount == 1)
+        #expect(!vm.pendingProxyStartForTests,
+                "a completed bind must not keep claiming a handoff is in flight")
 
         await vm.stopAuthProxyAwaitingForTests()
-        // `settle` joins the lease's own stop task, so there is no window where
-        // the state is still `.stopping`: the actor finishes `stop()` before the
-        // lease marks itself stopped.
+        // The lease's stop task is joined by `stopAuthProxyAwaitingForTests`, so
+        // there is no window where the state is still `.stopping`.
         #expect(await first.stopCount == 1)
         #expect(vm.installedProxyForTests == nil)
         #expect(vm.proxyLeaseForTests?.state == .stopped,
                 "the ViewModel path must drive the lease to a terminal state")
+    }
+
+    /// A caller arriving while a proxy is installed must REUSE it — the pre-fix code
+    /// could bind a second listener and throw one away.
+    ///
+    /// Split out from the install test on purpose, and driving `proxiedURL` rather
+    /// than `startAuthProxy`: reuse is a property of `proxiedURL`'s
+    /// `if let existing = authProxy` guard, not of `startAuthProxy`, which is the
+    /// unconditional "bind this proxy" primitive. Calling `startAuthProxy` a second
+    /// time with a second proxy asserts reuse at a layer that never promised it —
+    /// that call legitimately binds whatever it is handed.
+    @Test("an installed proxy is reused by the next request, not rebound")
+    func installedProxyIsReused() async throws {
+        let vm = makeViewModel()
+        let first = FakeAuthProxy(bindDelay: .milliseconds(20))
+        let second = FakeAuthProxy(bindDelay: .milliseconds(20))
+        let factoryCalls = SendableBox<Int>(0)
+
+        #expect(await vm.startAuthProxyForTests(first) != nil)
+        #expect(vm.installedProxyForTests === first)
+
+        // Second request goes through the production entry point, which must find the
+        // installed proxy and never ask the factory for another one. `proxyFactory` is
+        // the only way `proxiedURL` can obtain a proxy, so replacing it with one that
+        // would dispense `second` proves reuse without adding production API: if the
+        // guard regressed, the factory would be called, `second` would be started, and
+        // both counters below would catch it.
+        vm.proxyFactory = { _, _ in
+            factoryCalls.set(factoryCalls.current + 1)
+            return second
+        }
+
+        let url = await vm.proxiedURLForTests(
+            URL(string: "https://ta.example.com/video.mp4")!,
+            token: "t",
+            forAirPlay: false
+        )
+        #expect(url != nil, "the reused proxy must hand back a usable URL")
+        #expect(factoryCalls.current == 0, "an installed proxy must not trigger a factory call")
+        #expect(await second.startCount == 0, "a never-handed-out spare must not be started")
+        #expect(await first.startCount == 1, "the installed proxy must not be rebound")
+        #expect(vm.installedProxyForTests === first)
+
+        await vm.stopAuthProxyAwaitingForTests()
+        #expect(await first.stopCount == 1)
+        #expect(await second.stopCount == 0, "an unstarted spare must not be stopped")
     }
 
     // MARK: - Superseded handoff
