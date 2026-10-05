@@ -300,7 +300,7 @@ struct AuthProxyTests {
             #expect(await proxy.localPort == 0, "no socket may outlive the stop")
             #expect(await proxy.trackedConnectionCountForTests() == -1,
                     "no tracker reference may outlive the stop")
-            #expect(!await proxy.hasLiveTrackerForTests,
+            #expect(!(await proxy.hasLiveTrackerForTests),
                     "a stopped proxy must not hold an armed tracker")
             #expect(await proxy.proxyURL(for: media) == nil,
                     "a stopped proxy must not hand out a proxy URL")
@@ -359,8 +359,7 @@ enum TrySendThroughStoppedProxy {
         let request = "GET /nope HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
         let answered = SendableBox<Bool>(false)
         let done = SendableBox<Bool>(false)
-        let queue = DispatchQueue(label: "AuthProxyTests.stoppedProxyProbe")
-
+        
         connection.stateUpdateHandler = { state in
             switch state {
             case .failed, .cancelled, .waiting:

@@ -75,6 +75,7 @@ struct ObserverBagTests {
     /// verifies the post-deinit notification does not fire the callback. This
     /// proves observers are cleaned up under abnormal teardown (no explicit
     /// `stopPlayback()`) via the same path `VideoDetailViewModel.deinit` uses.
+    @MainActor
     @Test func bagOwner_deinit_tearsDownObserversIndirectly() {
         let name = Notification.Name("ru.mzhukov.TAClient.tests.observerBag.deinit.\(UUID().uuidString)")
         var fireCount = 0
