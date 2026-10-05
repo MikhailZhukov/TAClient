@@ -34,6 +34,21 @@ extension AuthProxy {
         acceptedConnections?.count ?? -1
     }
 
+    /// `true` while the actor holds an accepted-connection tracker whose shutdown
+    /// flag is clear, i.e. a tracker that would still accept peers.
+    ///
+    /// `trackedConnectionCountForTests()` cannot express this: an empty-but-live
+    /// tracker reports `0`, and a stopped one reports `-1` only because `stop()`
+    /// dropped the reference. The leak this pins is a `stop()` that races a bind and
+    /// leaves the bind's *new* tracker installed and armed after the stop ran — no
+    /// later path ever shuts it down.
+    internal var hasLiveTrackerForTests: Bool {
+        get async {
+            guard let accepted = acceptedConnections else { return false }
+            return !accepted.isShutdown
+        }
+    }
+
     /// Open a real loopback connection through the running listener so the tracker
     /// has something to cancel, and return it once the tracker has registered the
     /// peer. Returns `nil` if the listener is not bound, the peer never became

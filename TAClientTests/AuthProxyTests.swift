@@ -234,8 +234,12 @@ struct AuthProxyTests {
         #expect(url == nil)
     }
 
-    /// `stop()` twice is a no-op the second time, and a `stop()` on a proxy that
+    /// `stop()` twice tears the socket down once, and a `stop()` on a proxy that
     /// never started must not trap.
+    ///
+    /// The guard is `listener != nil`, not a boolean: the boolean version returned
+    /// before the teardown assignments, so a repeat `stop()` left `port` and the
+    /// tracker live (the two failures this test used to record).
     @Test func stop_isIdempotent() async throws {
         let proxy = AuthProxy(token: "t", serverBaseURL: URL(string: "https://ta.example.com")!)
         // `stop()` before `start()` must not trap.
@@ -253,14 +257,70 @@ struct AuthProxyTests {
         await proxy.stop()
         #expect(await proxy.localPort == 0)
 
-        // What the idempotency guard still guarantees after the poison fix: the proxy
-        // is dead once stopped, and its tracker is gone rather than left live.
+        // What idempotency still guarantees: the proxy is dead once stopped, and its
+        // tracker is gone rather than left live.
         #expect(await proxy.trackedConnectionCountForTests() == -1,
                 "stop() must drop the tracker")
 
         // A fresh proxy that was never started has no tracker.
         let fresh = AuthProxy(token: "t", serverBaseURL: URL(string: "https://ta.example.com")!)
         #expect(await fresh.trackedConnectionCountForTests() == -1, "no tracker before start()")
+    }
+
+    /// The `stop()`-vs-bind hole, pinned at the observable surface.
+    ///
+    /// `stop()` used to bail on a boolean idempotency guard BEFORE clearing `port` /
+    /// `acceptedConnections`, and `start()` installed its OWN tracker before the
+    /// bind poll. So a `stop()` that no-ops — because it is the second call, or
+    /// because the proxy was stopped before it ever started — let the bind publish a
+    /// listener AND an armed tracker that no later `stop()` would ever release.
+    ///
+    /// Two interleavings, both must end with nothing live. Case 2 is the deterministic
+    /// one (no timing dependence); case 1 is the same hole hit mid-poll.
+    @Test func stopRacingBindLeavesNothingLive() async throws {
+        let media = URL(string: "https://ta.example.com/media/vid.mp4")!
+        let base = URL(string: "https://ta.example.com")!
+
+        // Case 1: `stop()` lands while a bind is suspended in its poll.
+        let racing = AuthProxy(token: "t", serverBaseURL: base)
+        await racing.stop()
+        let started = Task { try? await racing.start() }
+        try await Task.sleep(for: .milliseconds(5))
+        await racing.stop()
+        _ = await started.value
+
+        // Case 2: the bind published, and the stop that follows is the no-op-by-flag
+        // one — under the old ordering it cleared nothing at all.
+        let published = AuthProxy(token: "t", serverBaseURL: base)
+        try await published.start()
+        await published.stop()
+        await published.stop()
+
+        for proxy in [racing, published] {
+            #expect(await proxy.localPort == 0, "no socket may outlive the stop")
+            #expect(await proxy.trackedConnectionCountForTests() == -1,
+                    "no tracker reference may outlive the stop")
+            #expect(!await proxy.hasLiveTrackerForTests,
+                    "a stopped proxy must not hold an armed tracker")
+            #expect(await proxy.proxyURL(for: media) == nil,
+                    "a stopped proxy must not hand out a proxy URL")
+        }
+    }
+
+    /// A stopped proxy is reusable: `start()` re-arms, and the fresh socket is then
+    /// releasable by `stop()`. The old design either poisoned the instance (tracker
+    /// refused everything for life) or left the new socket unstopped.
+    @Test func startAfterStopIsLiveAndStoppable() async throws {
+        let proxy = AuthProxy(token: "t", serverBaseURL: URL(string: "https://ta.example.com")!)
+        await proxy.stop()
+        try await proxy.start()
+        #expect(await proxy.localPort > 0)
+        #expect(await proxy.trackedConnectionCountForTests() != -1,
+                "a live proxy must have a tracker")
+
+        await proxy.stop()
+        #expect(await proxy.localPort == 0)
+        #expect(await proxy.trackedConnectionCountForTests() == -1)
     }
 
     // MARK: - Request rejection

@@ -17,9 +17,9 @@ struct AuthProxyLeaseTests {
 
     // MARK: - Helpers
 
-    /// Mirrors `AuthProxy`'s `isStopped` guard, so tests can assert the
-    /// socket-facing invariant ("stopped at most once") rather than counting
-    /// redundant dispatches that the real proxy swallows.
+    /// Mirrors `AuthProxy`'s idempotent `stop()` — a repeat call dispatches nothing —
+    /// so tests can assert the socket-facing invariant ("stopped at most once")
+    /// rather than counting redundant dispatches that the real proxy swallows.
     actor SpyProxy: AuthProxyConsumeProtocol {
         private(set) var startCount = 0
         private(set) var stopDispatches = 0
@@ -114,21 +114,25 @@ struct AuthProxyLeaseTests {
         let lease = AuthProxyLease(proxy: proxy)
 
         let owner = Task { await proxy.stop() }
-        lease.adopt(installedBy: owner)
+        lease.adopt()
         _ = await owner.value
         // Longer than the lease's backstop grace window.
-        try await Task.sleep(for: .milliseconds(400))
+        try await Task.sleep(for: AuthProxyLease.adoptedBackstopGrace + .milliseconds(300))
 
         // The backstop may still queue a `stop()`; the spy counts calls, not
         // sockets, so the contract to pin is (a) the socket definitely gets
-        // stopped and (b) the real proxy's own `isStopped` guard makes any extra
-        // call a no-op — see `AuthProxyTests.stop_isIdempotent`.
+        // stopped and (b) the real proxy's own teardown guard makes any extra call a
+        // no-op — see `AuthProxyTests.stop_isIdempotent`.
         #expect(await proxy.effectiveStops >= 1)
         #expect(!lease.hasPendingTeardown)
     }
 
     /// The backstop must fire when the owning task ends WITHOUT stopping — that
     /// is the leak this branch exists for.
+    ///
+    /// The caller joins the owner task itself (`Task` has no identity, so the lease
+    /// is never handed it) and then asks the lease to settle. This is the shape that
+    /// hung forever under the watcher-in-`_stoppingTask` design.
     @Test("adopted lease stops when the owning task does not")
     func adoptedLeaseStopsWhenOwnerDoesNot() async throws {
         let proxy = SpyProxy()
@@ -137,11 +141,48 @@ struct AuthProxyLeaseTests {
         // Simulates a bind task that installed the proxy and returned without
         // ever reaching its own `stop()`.
         let owner = Task<Void, Never> { }
-        lease.adopt(installedBy: owner)
+        lease.adopt()
         _ = await owner.value
 
         #expect(await settle(lease, proxy) == 1,
                 "an adopted lease must stop the proxy its owner failed to stop")
+        #expect(lease.state == .stopped)
+    }
+
+    /// The grace window exists so the owner's own `stop()` is not raced. It must
+    /// stay short enough that a test (and a coordinator) can bound the wait.
+    @Test("adopted backstop fires inside its grace window", .timeLimit(.minutes(1)))
+    func adoptedBackstopFiresWithinGraceWindow() async throws {
+        let proxy = SpyProxy()
+        let lease = AuthProxyLease(proxy: proxy)
+        lease.adopt()
+
+        let started = ContinuousClock.now
+        await lease.awaitStopping()
+        let elapsed = started.duration(to: .now)
+
+        #expect(await proxy.effectiveStops == 1)
+        #expect(elapsed < AuthProxyLease.adoptedBackstopGrace + .seconds(2),
+                "backstop must not linger: \(elapsed)")
+    }
+
+    /// A losing `startStopping()` must not disturb the winner. The earlier revision
+    /// cleared `_stoppingTask` on every call, so a second call landing in the first
+    /// one's claim→install gap detached the live stop task and `awaitStopping()` had
+    /// nothing left to join.
+    @Test("repeated startStopping keeps the live stop task joinable")
+    func repeatedStartStoppingKeepsTaskJoinable() async {
+        let proxy = SpyProxy()
+        let lease = AuthProxyLease(proxy: proxy)
+        let first = lease.startStopping()
+        #expect(first != nil, "the winning call must return its stop task")
+
+        for _ in 0..<50 {
+            #expect(lease.startStopping() == nil, "a losing call must be a no-op")
+        }
+
+        #expect(await settle(lease, proxy) == 1)
+        #expect(lease.state == .stopped)
     }
 
     @Test("adopt after startStopping is ignored")
@@ -150,8 +191,7 @@ struct AuthProxyLeaseTests {
         let lease = AuthProxyLease(proxy: proxy)
         lease.startStopping()
 
-        let owner = Task<Void, Never> { }
-        lease.adopt(installedBy: owner)
+        lease.adopt()
 
         #expect(await settle(lease, proxy) == 1)
         try await Task.sleep(for: .milliseconds(300))

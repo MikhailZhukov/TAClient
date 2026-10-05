@@ -248,11 +248,12 @@ final class VideoDetailViewModel {
     private var proxyOwnerGeneration: UInt64?
     /// The current bind task, erased to `Task<Void, Never>`.
     ///
-    /// Exists because `Task` is not class-constrained, so it cannot be passed as
-    /// `AnyObject`, cannot be compared with `===`, and cannot be handed to
-    /// `AuthProxyLease.adopt(installedBy:)` at its real generic type. This box holds
-    /// a `Void`-success task that simply awaits the real one, so "has the bind task
-    /// finished?" — the only thing the lease backstop needs — is answerable.
+    /// Exists because `Task` is not class-constrained: it cannot be passed as
+    /// `AnyObject`, cannot be compared with `===`, and cannot name a generic
+    /// `Success` across a `Void` boundary. So `AuthProxyLease.adopt()` takes no task
+    /// at all, and this box is what `stopAuthProxy()` joins before letting the lease
+    /// run its backstop — "has the bind task finished?" is the only question the
+    /// grace window needs answered.
     @ObservationIgnored
     private let bindTaskBox = SendableBox<Task<Void, Never>?>(nil)
     @ObservationIgnored
@@ -948,18 +949,38 @@ final class VideoDetailViewModel {
         cancelProxyStart()
         guard let proxy = authProxy else { return }
         authProxy = nil
-        proxyTeardown = AuthProxyLease(proxy: proxy)
+        let lease = AuthProxyLease(proxy: proxy)
+        proxyTeardown = lease
         // A bind that installed the proxy AND still owns it (i.e. it installed after
         // this teardown's generation bump, so the teardown never released ownership)
-        // is the socket's owner and will stop it. Hand the lease the erased twin to
-        // watch as a backstop. Otherwise this teardown owns the proxy and stops it.
+        // is the socket's owner and will stop it. The lease records the handoff and
+        // waits as a backstop; the twin it must not race is joined OUTSIDE the lease,
+        // because a `Task` has no identity to store (`adopt()` takes no parameter).
+        // Otherwise this teardown owns the proxy and stops it.
         if pending != nil, let watchedBind = adoptedTwin, let owner = proxyOwnerGeneration,
            owner == proxyGeneration {
             proxyOwnerGeneration = nil
-            proxyTeardown?.adopt(installedBy: watchedBind)
+            lease.adopt()
+            // Owner first, then the backstop: `awaitStopping()` would otherwise sit
+            // out the lease's grace window against a bind task that is still running.
+            //
+            // Bounded join, not `_ = await watchedBind.value`: this task holds a
+            // STRONG lease reference (a `Task` is not cancellable from the lease, so
+            // the lease cannot drop it), and a bind that never returns would pin the
+            // lease — and the actor still inside it — for the process lifetime. On
+            // timeout the lease's own backstop runs and releases the socket.
+            Task { [lease] in
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { _ = await watchedBind.value }
+                    group.addTask { try? await Task.sleep(for: .seconds(30)) }
+                    await group.next()
+                    group.cancelAll()
+                }
+                await lease.awaitStopping()
+            }
             return
         }
-        proxyTeardown?.startStopping()
+        lease.startStopping()
     }
 
     /// The teardown lease, for asserting `deinit`/`stopPlayback` handoff.

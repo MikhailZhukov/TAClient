@@ -145,24 +145,40 @@ actor AuthProxy {
     private let token: String
     private let serverBaseURL: URL
     private let pathSecret = UUID().uuidString
-    /// Set by `stop()` so a late `.failed` callback from the listener being
-    /// torn down cannot resurrect the proxy through `restartListener()`.
-    /// `NWListener.cancel()` is asynchronous, so that callback really can land
-    /// after `stop()` has already returned.
-    private var isStopped = false
-    /// Bumped by `stop()`. A `start()` captures this at entry and compares after the
-    /// bind poll, so it can tell "a `stop()` targeted the socket I am producing" from
-    /// "this proxy was already dead when I began".
+    /// "The published listener was torn down." `stop()` sets it so a late `.failed`
+    /// callback from the listener being cancelled cannot resurrect the proxy through
+    /// `restartListener()` — `NWListener.cancel()` is asynchronous, so that callback
+    /// really can land after `stop()` has already returned.
     ///
-    /// Needed because a boolean cannot express that difference, and the two cases need
-    /// opposite handling:
-    /// - stopped BEFORE this `start()` began (e.g. `stop()` on a fresh instance, then
-    ///   `start()`): the stale flag must not veto a brand-new bind — that made a
-    ///   never-started proxy permanently un-startable;
-    /// - stopped DURING this `start()`'s poll: the new listener must be unwound, or it
-    ///   stays bound with the token inside it and nobody will ever cancel it.
-    /// `isStopped` alone reads identically in both cases.
-    private var stopGeneration = 0
+    /// Narrow on purpose, and NOT read by `stop()`: every `start()` clears it to open
+    /// a new epoch. Using a boolean as `stop()`'s idempotency guard was the leak — the
+    /// guard returned BEFORE the teardown assignments, so a second `stop()`, or one
+    /// landing during a bind on a proxy already stopped once, skipped `port = 0` /
+    /// `acceptedConnections = nil` and left a live socket nobody owns. The publish
+    /// decision and idempotency live in `stoppedGeneration`, and `restartListener()`
+    /// is gated on `listener != nil`, which cannot go stale.
+    private var listenerWasTornDown = false
+    /// Bumped by `start()` and captured by it before the first suspension: identifies
+    /// the bind generation whose socket `stop()` would be tearing down.
+    private var startEpoch = 0
+    /// The `startEpoch` of the generation `stop()` last tore down, or `-1` when
+    /// nothing has ever been stopped.
+    ///
+    /// One field carries both facts `stop()` must communicate across the bind's
+    /// suspension point:
+    /// - **that it ran** — stamped on every call, including the no-op second one, so
+    ///   "the value is no longer `-1`/no longer mine" is exactly "a stop targeted the
+    ///   socket I am producing";
+    /// - **that nothing is live** — `start()` resets it to `-1` only when it actually
+    ///   publishes, so a `stop()` landing in the gap between the bind poll and the
+    ///   publish still reads as a change rather than being silently accepted.
+    ///
+    /// A boolean cannot express either fact. The stop flag reads identically for
+    /// "stopped before this `start()` began" (must NOT veto a brand-new bind — that
+    /// made a never-started proxy un-startable for life) and "stopped during this
+    /// bind" (must unwind the new listener, or it stays bound with the token inside
+    /// it and nobody will ever cancel it).
+    private var stoppedGeneration = -1
     /// Shutdown flag plus the set of connections accepted by the current
     /// listener. `stop()` flips it and cancels everything still in flight, so
     /// no per-request streaming task survives the proxy that authorised it.
@@ -183,9 +199,15 @@ actor AuthProxy {
     }
 
     func start() async throws {
-        // Captured before anything can suspend, so a `stop()` during the poll is
-        // detectable as a CHANGE rather than inferred from a flag that may predate us.
-        let startedAtGeneration = stopGeneration
+        // Open a new epoch before the first suspension: bump the epoch `stop()`
+        // stamps against, clear the resurrection guard, and clear any stamp a
+        // previous `stop()` left. A `stop()` that ran before this call (including on
+        // a never-started instance) must not veto a brand-new bind, and a `stop()`
+        // that lands during the poll must be detectable as a CHANGE of
+        // `stoppedGeneration` rather than inferred from a flag that may predate us.
+        startEpoch += 1
+        listenerWasTornDown = false
+        stoppedGeneration = -1
         let params = NWParameters.tcp
         #if !targetEnvironment(simulator)
         // The simulator's host network stack rejects even 127.0.0.1 peers under
@@ -194,12 +216,12 @@ actor AuthProxy {
         #endif
         let listener = try NWListener(using: params, on: .any)
 
-        // Always born UNSHUT down. The previous behaviour — inherit `isStopped` — was
+        // Always born UNSHUT down. The previous behaviour — inherit the stop flag — was
         // how "stopped before ever starting" poisoned a fresh tracker: a proxy stopped
         // once would refuse every connection for the rest of its life, and there is no
         // path that clears it. A tracker that outlives its bind is guarded instead by
-        // the `stopGeneration` check below, which unwinds the tracker on every failure
-        // path, so nothing unrefusable can escape.
+        // the publish guard below, which unwinds the tracker on every failure path, so
+        // nothing unrefusable can escape.
         let accepted = AcceptedConnections(isShutdown: false)
         self.acceptedConnections = accepted
 
@@ -277,17 +299,18 @@ actor AuthProxy {
             listener.cancel()
             throw AppError.unknown(message: "AuthProxy failed to bind")
         }
-        // A `stop()` that landed while `start()` was polling has already cancelled
-        // this listener; do not hand a dead socket back to the caller (and do not
-        // reinstall a state handler on it).
-        //
-        // Releasing `accepted` here is mandatory: line ~187 installed it into
-        // `self.acceptedConnections` BEFORE the poll, and `stop()`'s own teardown ran
-        // while `start()` was still suspended, so the tracker assigned at 187 is
-        // still sitting in the property with nobody left to shut it down. Throwing
-        // without clearing it leaked the tracker (and any peer the listener accepted
-        // during the bind window) on exactly this path.
-        guard stopGeneration == startedAtGeneration else {
+        // Publish only if no `stop()` targeted this generation. `stop()` stamps
+        // `stoppedGeneration = startEpoch` unconditionally — before its own
+        // idempotency guard, so the no-op second call stamps too — and `start()`
+        // clears the stamp when it opens the epoch. Any non-`-1` value therefore
+        // means a `stop()` ran against the generation this bind is producing:
+        // - one that landed *during* the poll cancelled a socket nobody else can
+        //   find, because it was never published — handing it back leaks a bound
+        //   listener with the token inside it;
+        // - one that landed in the actor's queue while this body was still running
+        //   (its `startEpoch` read is the epoch being produced), which is exactly
+        //   the "stop raced the bind" case.
+        guard stoppedGeneration == -1 else {
             accepted.shutdown()
             if acceptedConnections === accepted { acceptedConnections = nil }
             listener.stateUpdateHandler = nil
@@ -295,13 +318,9 @@ actor AuthProxy {
             throw AppError.unknown(message: "AuthProxy stopped while starting")
         }
 
-        // The bind succeeded and this generation owns the socket. `isStopped` is
-        // deliberately left alone: it now means only "a torn-down listener's late
-        // `.failed` must not resurrect the proxy" (see its declaration), and the
-        // stopped-vs-stopping distinction the guard above needed is carried by
-        // `stopGeneration`. Clearing it here was my previous attempt and it was wrong
-        // in both directions — it ran after the guard that consumed it, and it
-        // discarded the resurrection guard for a proxy that had genuinely been stopped.
+        // The bind succeeded and this generation owns the socket. The
+        // stopped-vs-stopping distinction the guard above needed is carried entirely
+        // by `stoppedGeneration`, which is cleared below so the socket reads as live.
 
         // Monitor listener state after start.
         //
@@ -330,6 +349,8 @@ actor AuthProxy {
 
         self.listener = listener
         self.port = assignedPort
+        // Live from now on: a `stop()` must find something to tear down.
+        stoppedGeneration = -1
     }
 
     /// Rebind after a transport failure. A failed listener is already dead,
@@ -337,7 +358,13 @@ actor AuthProxy {
     /// through the same path as `stop()` and left the old listener's async
     /// `.cancelled` callback racing the new one.
     func restartListener() {
-        guard !isStopped, listener != nil else { return }
+        // Rebind is allowed whenever a listener is actually live. The old gate read
+        // the stop flag, which a no-op `stop()` (or one that landed before any bind)
+        // left set with nothing live behind it — permanently vetoing a legitimate
+        // rebind. `listener != nil` is the honest precondition: `stop()` nils the
+        // listener in the same actor hop that tears it down, and a bind that lost the
+        // publish race never set one.
+        guard listener != nil else { return }
         Self.logger.warning("Attempting restart...")
         // The old listener's connections belong to a socket that is gone; drop
         // them and let `start()` install a fresh tracker.
@@ -351,12 +378,20 @@ actor AuthProxy {
     }
 
     func stop() {
-        // Bumped BEFORE the idempotency guard's body, and unconditionally paired with
-        // `isStopped`, so any `start()` in flight sees the change even when this call
-        // is the second/no-op one for a given generation.
-        stopGeneration += 1
-        guard !isStopped else { return }
-        isStopped = true
+        // Stamped FIRST and unconditionally, before the teardown body: a `start()`
+        // suspended in its bind poll (or between the poll and its publish) must see
+        // that this generation was stopped even when this call is the second/no-op
+        // one for the live socket. Gating the teardown on a boolean was the bug: that
+        // guard returned early on a repeat call and on a proxy stopped before it ever
+        // started, and in both cases the in-flight bind went on to publish a listener
+        // plus tracker that nobody would ever release.
+        stoppedGeneration = startEpoch
+        // Idempotency: a listener that is already gone has nothing left to tear down.
+        // `listener == nil` means either "never bound" or "the bind is still in
+        // flight" — in the latter case the stamp above is what makes the bind task
+        // unwind its own socket, so this stays safe without a second teardown path.
+        guard listener != nil else { return }
+        listenerWasTornDown = true
         // Cancel in-flight request handlers before the listener. Each handler
         // streams an upstream body into an `NWConnection` with
         // `timeoutIntervalForRequest = 0`, so nothing else ends it: without this
@@ -650,6 +685,20 @@ protocol AuthProxyConsumeProtocol: Actor {
 /// The lease closes that gap by making the pending stop an *object* the owner can
 /// see (`hasPendingTeardown`) and hand to whoever can finish it.
 ///
+/// Two invariants carry the whole design; every method below exists to keep them
+/// true under concurrent callers:
+///
+/// 1. **Single owner.** Exactly one path ever dispatches the effective `stop()`
+///    for a socket: the lease's own stop task, the external taker, or (after an
+///    `adopt()`) the lease itself once the bind task that owned the socket has
+///    finished. The proxy reference leaves `proxy` exactly once.
+/// 2. **Nothing observable as outstanding without something to join it.**
+///    `.stopping` always names a live task in `_stoppingTask` (claim + install are
+///    one synchronous section), and `.adopted` is joined by the call site that
+///    created the bind task. A lost or placeholder task is exactly what hung
+///    `awaitStopping()`: the waiter awaits an already-finished task, re-reads, sees
+///    the same finished task, and never progresses.
+///
 /// Isolation: `nonisolated final class … : @unchecked Sendable` (see
 /// `AcceptedConnections` for why this form and not per-member `nonisolated`). It is
 /// load-bearing rather than stylistic: the entire purpose of the lease is to be
@@ -660,25 +709,38 @@ nonisolated final class AuthProxyLease: @unchecked Sendable {
         /// Created, not yet stopping. A `deinit` that finds the lease in this
         /// state takes it over.
         case pending
-        /// `stop()` has been dispatched. Nobody else needs to do anything.
+        /// `stop()` has been dispatched. `_stoppingTask` names that task: the claim
+        /// and the install share one synchronous critical section, so this state is
+        /// never observable with a nil or stale task.
         case stopping
         /// `stop()` completed.
         case stopped
         /// The proxy was handed to a bind task that owns the socket; the lease
-        /// stops it only if that task ends without doing so. The task itself is not
-        /// carried in the case payload — see `adopt(installedBy:)`.
+        /// stops it only if that task ends without doing so.
+        ///
+        /// This state may last as long as the owner task runs, so it is NOT "work is
+        /// done". The lease holds NO task for it and NO reference to the owner:
+        /// joining the owner is the call site's job (it holds the `Task`), and
+        /// `awaitStopping()` then finishes the handoff via `finishAdoption()` —
+        /// `Task` is not class-constrained, so the lease could not store or compare
+        /// one anyway. An earlier design installed a watcher task into
+        /// `_stoppingTask` here, and that shared slot was the hang: the watcher's
+        /// install happened after an `await`, so a peer could nil or replace the
+        /// slot in between and strand the real stop task.
         case adopted
         /// `takeForExternalStop()` handed the proxy to a taker (a `deinit`) that runs
         /// the stop itself, so the lease has no task of its own and nothing to join.
         ///
-        /// A distinct state rather than `.stopping` with a placeholder task, because
-        /// that placeholder was an immediately-complete `Task {}` and `awaitStopping()`
-        /// spun on it forever: await it, re-read, see the same placeholder, await
-        /// again. A no-op task is not a substitute for "there is nothing here to
-        /// await", and the type now says so instead of lying with a finished task.
+        /// A distinct state rather than `.stopping` with a placeholder task: a
+        /// placeholder (`Task {}`) is immediately complete, so a waiter would await
+        /// it, re-read, see the same placeholder, and await again forever. A no-op
+        /// task is not a substitute for "there is nothing here to await", and the
+        /// type says so instead of lying with a finished task.
         case claimedExternally
     }
 
+    /// Separate category so a broken lease invariant is greppable in device logs.
+    static let leakLogger = Logger(subsystem: "ru.mzhukov.TAClient", category: "AuthProxyLease")
     private let lock = NSLock()
     private var _state: State = .pending
     /// Both lock-guarded. Plain stored properties — the class-level `nonisolated`
@@ -704,98 +766,59 @@ nonisolated final class AuthProxyLease: @unchecked Sendable {
         }
     }
 
-    /// Dispatch `stop()` unless someone already has. Idempotent.
+    /// Dispatch `stop()` unless someone already has. Idempotent: a call that does
+    /// not win the claim returns `nil` and touches no state.
     ///
-    /// The work runs in a task stored on the lease, not a floating one, so
-    /// `awaitStopping()` (tests) and any future coordinator can join it instead
-    /// of polling a counter or guessing a sleep.
+    /// The claim, the state change and the task install happen in ONE synchronous
+    /// critical section, so `.stopping` is never observable with a nil or stale
+    /// `_stoppingTask`. No placeholder task, no install-after-`await`, no window for
+    /// a second caller to clear the slot: an earlier revision nil'd `_stoppingTask`
+    /// from a losing call while the winner was between claim and install, which
+    /// stranded the live stop task and hung `awaitStopping()`.
+    ///
+    /// `Task.init` only schedules, so running it under the lock dispatches nothing
+    /// before the section releases — the stop still cannot observe the lease mid-claim.
     @discardableResult
     func startStopping() -> Task<Void, Never>? {
-        // Claim the proxy and flip the state in one critical section, then create
-        // the task OUTSIDE the lock. Two invariants that cannot both be satisfied
-        // by "just build the task inside the lock":
-        //
-        // - `_stoppingTask` must never be observable as nil while the state is
-        //   `.stopping`, or `awaitStopping()` returns without joining anything;
-        // - the critical section must not call out to code we do not own.
-        //
-        // So the task is built after the claim. The gap between the two is closed by
-        // `awaitStopping()` treating `.stopping`-with-nil-task as "not installed yet"
-        // and re-reading, exactly as it does for `.adopted` — NOT by a placeholder
-        // task. A placeholder (`Task {}`) is immediately complete, so a waiter would
-        // await it, re-read, still see it, and spin; and if the real task were ever
-        // installed after a waiter had passed the re-read, the waiter would have
-        // already returned "done" for a stop that had not run.
-        let claim: (any AuthProxyConsumeProtocol)? = lock.withLock {
+        let task: Task<Void, Never>? = lock.withLock {
             guard case .pending = _state else { return nil }
             _state = .stopping
-            let claimed = proxy
             // The lease stops owning the proxy reference the moment the stop is
             // claimed: from here only the stop task (or an external taker) holds
             // it, so a `deinit` cannot resurrect a second stop for the same socket.
+            let held = proxy
             proxy = nil
-            return claimed
+            // Nothing left to stop — a handoff already moved the proxy out. Settle
+            // instead of leaving `.stopping` pointing at a task that never comes.
+            guard let held else {
+                _state = .stopped
+                return nil
+            }
+            let task = Task { [weak self] in
+                await held.stop()
+                self?.markStopped()
+            }
+            _stoppingTask = task
+            return task
         }
-        guard let claim else { return nil }
-        let task = Task { [weak self] in
-            await claim.stop()
-            self?.markStopped()
-        }
-        lock.withLock { if case .stopping = _state { _stoppingTask = task } }
         return task
     }
 
     /// Hand the socket to the bind task that is responsible for stopping it. The
     /// lease stays as a backstop: if that task finishes without stopping (it handed
     /// the proxy to someone else, or was cancelled between its install decision and
-    /// its own `stop()`), the lease finishes the job.
+    /// its own `stop()`), the lease finishes the job — see `finishAdoption()`.
     ///
-    /// Typed `Void`-success, not the concrete `Task<(any AuthProxyConsumeProtocol)?,
-    /// Never>` the ViewModel's bind task actually is, because `Task` is **not**
-    /// class-constrained: identity comparison (`===`) on a `Task` does not compile,
-    /// and naming a `Success` type here would force every call site to match it
-    /// exactly. So the ViewModel passes an erased `Task<Void, Never>` whose single
-    /// job is to outlive the real bind task, and this waits on that.
-    func adopt(installedBy task: Task<Void, Never>) {
-        let adopted: Task<Void, Never>? = lock.withLock {
-            guard case .pending = _state else { return nil }
-            _state = .adopted
-            return task
-        }
-        guard let adopted else { return }
-        // Built BEFORE the state is observable as adopted-without-a-task, and installed
-        // under the same lock that later reads it. The watcher is created outside the
-        // lock (a critical section must not call code we do not own) but `Task.init`
-        // only schedules, so nothing runs before the install below.
-        let watcher = Task { [weak self] in
-            _ = await adopted.value
-            // Give the owning task's own `stop()` a chance to land on the actor first,
-            // so a normal handoff does not queue a redundant stop.
-            try? await Task.sleep(for: .milliseconds(100))
-            self?.startStopping()
-        }
-        // Unconditional install, NOT `if case .adopted`. This was the deadlock: the
-        // watcher's body can run to completion on another thread before this line
-        // executes — it awaits nothing but the already-finished owner task plus a
-        // sleep — and its `startStopping()` moves the state to `.stopping`. The old
-        // conditional then refused to install, so `_stoppingTask` kept holding the
-        // PLACEHOLDER from the claim, and `awaitStopping()` awaited that no-op forever
-        // while the real stop task sat unreachable. Installing the watcher
-        // unconditionally is safe because it is a strict superset of the placeholder's
-        // job: awaiting it covers both "watcher still waiting" and "watcher already
-        // dispatched the stop", and `awaitStopping()` re-reads to pick up whichever
-        // task is current.
+    /// No parameter, and that is deliberate. The owner task cannot be stored here:
+    /// `Task` is not class-constrained, so it has no identity to compare and cannot
+    /// be kept as `AnyObject`; and the watcher that used to wait on it had to write
+    /// itself into `_stoppingTask` after an `await`, which is the race that hung
+    /// `awaitStopping()`. The call site already holds the task — it just created it
+    /// — so joining it there costs nothing and shares no state.
+    func adopt() {
         lock.withLock {
-            switch _state {
-            case .adopted:
-                _stoppingTask = watcher
-            case .stopping:
-                // The watcher already won and dispatched. Keep the real stop task — it
-                // is strictly the later, more informative thing to join.
-                break
-            default:
-                break
-            }
+            guard case .pending = _state else { return }
+            _state = .adopted
         }
     }
 
@@ -814,52 +837,96 @@ nonisolated final class AuthProxyLease: @unchecked Sendable {
     /// a detached task it owns.
     func takeForExternalStop() -> (any AuthProxyConsumeProtocol)? {
         lock.withLock {
-            guard case .pending = _state else {
-                proxy = nil
-                return nil
-            }
+            // Only an unclaimed lease has something to hand out. A taker must never
+            // receive the proxy after a stop was dispatched or the socket was adopted,
+            // and a settled lease holds nil anyway.
+            guard case .pending = _state else { return nil }
             let taken = proxy
             proxy = nil
-            _stoppingTask = nil
             _state = .claimedExternally
             return taken
         }
     }
 
-    /// Await the dispatched stop, if one is in flight. For tests and for any
-    /// caller that must not proceed until the socket is actually released.
+    /// Await the stop this lease is responsible for: the dispatched
+    /// `startStopping()` task, or — after an `adopt()` whose owner task the caller
+    /// has already joined — the backstop stop. For tests and for any caller that
+    /// must not proceed until the socket is actually released.
     ///
-    /// Loops because of the adopted branch: while the lease waits on its owner
-    /// task, `_stoppingTask` holds that watcher, and the watcher's own
-    /// `startStopping()` replaces it with the real stop task. Re-reading until the
-    /// state is terminal keeps this correct without exposing the intermediate.
+    /// Termination is structural: every path either returns or awaits a task that
+    /// cannot outlive the stop it stands for.
+    /// - `.stopping` joins the stop task, installed by the claim synchronously.
+    /// - `.adopted` dispatches the backstop and joins it.
+    /// - `.pending` / `.claimedExternally` mean the lease owes nothing: an owner
+    ///   that never claimed, or a taker that owns the stop on a task of its own.
     func awaitStopping() async {
         while true {
             let snapshot = lock.withLock { (state: _state, task: _stoppingTask) }
             switch snapshot.state {
-            case .stopped:
+            case .stopped, .pending, .claimedExternally:
                 return
-            case .pending, .claimedExternally:
-                // Nothing on this lease to join: `.pending` means the owner (or
-                // `deinit`) still owes the stop, `.claimedExternally` means a taker
-                // owns it and the lease holds no task.
+            case .adopted:
+                if let stopTask = finishAdoption() {
+                    await stopTask.value
+                }
                 return
-            case .adopted, .stopping:
-                // Both have an outstanding obligation. A nil task here means the
-                // task has not been installed yet — never "there is nothing to do" —
-                // so yield and re-read rather than reporting a bound socket released.
+            case .stopping:
+                // `startStopping()`/`finishAdoption()` install the task inside the
+                // same critical section that sets `.stopping`, so nil here is a
+                // broken invariant rather than a transient. Log it loudly and return
+                // — never spin: a socket already torn down is not worth a hung caller.
                 guard let task = snapshot.task else {
-                    try? await Task.sleep(for: .milliseconds(5))
-                    continue
+                    Self.leakLogger.error("AuthProxyLease is .stopping with no stop task installed")
+                    return
                 }
                 await task.value
-                // Re-read: an adopted watcher ends by calling `startStopping()`, which
-                // replaces `_stoppingTask` with the real stop task. Termination is
-                // structural, not assumed: every pass either returns or awaits, and the
-                // state only ever advances toward `.stopped`.
             }
         }
     }
+
+    /// Adopted path: claim the socket and dispatch the backstop `stop()` after a
+    /// grace window, returning the task so a caller that must not proceed until the
+    /// socket is released can join it. Returns `nil` when this lease is no longer
+    /// `.adopted` (a concurrent finish/stop already owns the socket — that path owes
+    /// the join).
+    ///
+    /// Claim and install happen in one synchronous section, and the grace window
+    /// runs inside the task, so nothing can take the socket between this call and
+    /// the stop.
+    ///
+    /// Callers that only need the guarantee can ignore the result: the stop is
+    /// dispatched either way, and the lease's state advances to `.stopped`.
+    @discardableResult
+    func finishAdoption() -> Task<Void, Never>? {
+        let task: Task<Void, Never>? = lock.withLock {
+            guard case .adopted = _state else { return nil }
+            // Claim synchronously, ahead of the grace window.
+            let held = proxy
+            proxy = nil
+            _state = .stopping
+            guard let held else {
+                _state = .stopped
+                return nil
+            }
+            let task = Task { [weak self] in
+                // Grace window: give the owning bind task's own `stop()` a chance to
+                // land on the actor first, so a normal handoff is not raced by a
+                // redundant queued dispatch.
+                try? await Task.sleep(for: Self.adoptedBackstopGrace)
+                await held.stop()
+                self?.markStopped()
+            }
+            _stoppingTask = task
+            return task
+        }
+        return task
+    }
+
+    /// Grace the adopted backstop waits before stopping, so the owning bind task's
+    /// own `stop()` lands first and a normal handoff is not raced by a redundant
+    /// dispatch. `internal static` so tests bound their waits off the constant
+    /// instead of hardcoding a duration.
+    static let adoptedBackstopGrace = Duration.milliseconds(100)
 
     private func markStopped() {
         lock.withLock {
@@ -880,11 +947,11 @@ extension AuthProxyLease {
     var hasPendingTeardown: Bool {
         lock.withLock {
             if case .pending = _state { return proxy != nil }
-            // `.adopted` is deliberately NOT reported as pending: the lease is not
-            // waiting for a `deinit` to take over — it has an owner task and a
-            // backstop watcher that will fire. Reporting it pending would invite a
-            // `deinit` to take a lease that already has a dispatcher, giving one
-            // socket two owners. `.stopping`/`.stopped` are likewise not pending.
+            // `.adopted` is deliberately NOT reported as pending: the socket has a
+            // live bind task and the lease has a backstop for it. Reporting it
+            // pending would invite a `deinit` to take a lease whose owner is still
+            // running, giving one socket two owners. `.stopping`/`.stopped` are
+            // likewise not pending.
             return false
         }
     }
