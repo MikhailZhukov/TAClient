@@ -259,7 +259,7 @@
 - Modify: `TAClient/Data/Cache/VideoCachePreloader.swift`
 - Modify: `TAClientTests/VideoCachePreloaderTests.swift` / `TAClientTests/CacheAuthFailureTests.swift`
 
-- [ ] TDD (инстансы `VideoCachePreloader(isTokenCurrent: fake)` + существующий
+- [x] TDD (инстансы `VideoCachePreloader(isTokenCurrent: fake)` + существующий
       `testSessionConfigurationOverride` + MockURLProtocol):
       - `probeTotalSize` HEAD 401 + `{ false }` → нотификации нет
       - `probeTotalSize` HEAD 401 + `{ true }` → нотификация есть
@@ -267,16 +267,16 @@
       - `downloadRange` GET 401 + `{ false }` → нотификации нет
       - `downloadRange` GET 401 + `{ true }` → нотификация есть
       - `downloadRange` GET 403 + `{ false }` → нотификации нет
-- [ ] **`private init()` → internal `init(isTokenCurrent: (@Sendable (String) -> Bool)? = nil)`**
+- [x] **`private init()` → internal `init(isTokenCurrent: (@Sendable (String) -> Bool)? = nil)`**
       (явное расширение видимости — failing-тесты без него не скомпилируются; НЕ мутировать
       `.shared` и НЕ вводить test-only static); `static let shared =
       VideoCachePreloader(isTokenCurrent: { KeychainService().isCurrentAuthToken($0) })`;
       оба post-site: если closure задан и токен не текущий → log + без поста (остальной
       flow — return/abort — не меняется)
-- [ ] Инстансы на тест: `init` регистрирует memory-pressure `DispatchSource` без `deinit`-отмены —
+- [x] Инстансы на тест: `init` регистрирует memory-pressure `DispatchSource` без `deinit`-отмены —
       `deinit` в production-класс ради тестов НЕ добавлять (handler `[weak self]`, безвредно);
       инстанс на тест-кейс приемлем
-- [ ] Запустить тесты — зелёные, до Task 8 не переходить
+- [x] Запустить тесты — зелёные, до Task 8 не переходить
 
 ### Task 8: APIClient stale-token door (E)
 

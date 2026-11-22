@@ -113,6 +113,37 @@ extension DataLayerSuite {
         #expect(!fired, "Stale-token HEAD-probe 401 must not post .taAuthUnauthorized")
     }
 
+    @Test func preloader_headProbe401_nilTokenCheck_postsNotification_legacy() async {
+        VideoCachePreloader.testSessionConfigurationOverride = MockResponse.makeConfiguration()
+        MockResponse.setUp(statusCode: 401, data: Data())
+        defer {
+            VideoCachePreloader.testSessionConfigurationOverride = nil
+            MockResponse.tearDown()
+        }
+
+        // Default `isTokenCurrent: nil` — the legacy path must preserve the
+        // pre-guard behavior (post on 401). Default init is deterministic:
+        // unlike `.shared`, it never consults the real keychain.
+        let preloader = VideoCachePreloader()
+        let expectation = NotificationExpectation(
+            name: .taAuthUnauthorized,
+            senderId: "vid-legacy-head-preload"
+        )
+
+        await preloader.startPreloadWithRetry(
+            videoId: "vid-legacy-head-preload",
+            url: URL(string: "https://ta.example.com/media/vid-legacy-head.mp4")!,
+            token: "test-token",
+            // Both > 0 so downloadVideo enters the HEAD-probe branch.
+            startPosition: 15,
+            duration: 60,
+            maxRetries: 0
+        )
+
+        let fired = await expectation.wait(timeoutSeconds: 5)
+        #expect(fired, "Nil isTokenCurrent (legacy) HEAD-probe 401 must still post .taAuthUnauthorized")
+    }
+
     @Test func preloader_headProbe401_currentToken_postsNotification() async {
         VideoCachePreloader.testSessionConfigurationOverride = MockResponse.makeConfiguration()
         MockResponse.setUp(statusCode: 401, data: Data())
