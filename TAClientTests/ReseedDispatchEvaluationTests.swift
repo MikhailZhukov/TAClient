@@ -166,7 +166,7 @@ extension DataLayerSuite {
 
     /// After the debounce window expires (>2s), a follow-up tick at a similar
     /// byte target dispatches again. Pins the "stale 2s debounce is harmless"
-    /// contract from the plan (CLAUDE.md note in `lastReseedAt`).
+    /// contract from the plan (docs/agents/playback.md note in `lastReseedAt`).
     @Test func debounce_afterWindow_dispatchesAgain() {
         let vid = "vid-debounce-window"
         let totalSize: Int64 = 1_000_000_000

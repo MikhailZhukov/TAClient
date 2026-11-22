@@ -67,7 +67,7 @@ final class StreamingSession: NSObject, URLSessionDataDelegate, @unchecked Senda
     /// Start the request and hand back the response headers plus a stream of
     /// body chunks.
     ///
-    /// Cancellation contract (see CLAUDE.md, "URLSession lifecycle invariant"):
+    /// Cancellation contract (see docs/agents/playback.md, "URLSession lifecycle invariant"):
     /// a delegate-based `URLSession` strong-retains this instance until
     /// invalidated, and invalidation happens ONLY in
     /// `urlSession(_:task:didCompleteWithError:)`. That callback is guaranteed

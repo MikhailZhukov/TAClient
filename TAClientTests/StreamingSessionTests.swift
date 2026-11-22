@@ -3,7 +3,7 @@ import Foundation
 @testable import TAClient
 
 /// Weak-ref tests proving the URLSession lifecycle invariant in
-/// `StreamingSession` (see CLAUDE.md). After the consumer drops its strong
+/// `StreamingSession` (see docs/agents/playback.md). After the consumer drops its strong
 /// reference, ARC must reclaim the instance within the polling window.
 /// Nested under `DataLayerSuite(.serialized)` because `MockURLProtocol`
 /// shares `nonisolated(unsafe)` static state with other Phase 3 tests.

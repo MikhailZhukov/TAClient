@@ -20,7 +20,7 @@ nonisolated struct ReseedTrigger: Sendable {
     /// when comparing playback position against region bounds expressed
     /// in seconds-space. The production code computes
     /// `byte = seconds * (totalSize / duration)`, which can overshoot or
-    /// undershoot by up to ~300 MB on VBR content (per CLAUDE.md note on
+    /// undershoot by up to ~300 MB on VBR content (per docs/agents/playback.md note on
     /// VBR-safe trim). Comparing in seconds-space with this guard band
     /// means the same systematic estimation error appears on both sides
     /// of the inequality and is tolerated. 30 seconds at typical bitrate

@@ -592,7 +592,7 @@ final class VideoDetailViewModel {
     /// the store, runs the seconds-space `ReseedTrigger.shouldReseed` gate,
     /// and maps `currentSeconds` → byte anchor via the same
     /// `seconds * avgByterate` formula used elsewhere (`logCacheHealth`, the
-    /// `currentByte` discussion in CLAUDE.md). Returns `nil` for any of:
+    /// `currentByte` discussion in docs/agents/playback.md). Returns `nil` for any of:
     /// missing entry, videoId mismatch, small-file case, in-region position,
     /// or `duration <= 0`. The preloader's `reseedMain` re-clamps into
     /// `[prefixEnd, totalSize]` so VBR slop on the byte mapping is harmless.

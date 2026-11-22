@@ -496,8 +496,8 @@ struct AVPlayerView: UIViewControllerRepresentable {
         // `VideoDetailViewModel.handleAirPlayBecameActive` and any future
         // mid-session item swaps on the same player. The KVO observation is
         // installed below (`currentItemObserver`) and torn down in `deinit`.
-        // The codebase still defaults to one AVPlayer per video (per CLAUDE.md
-        // "ViewModel lifecycle in NavigationStack"); the KVO is a defence-in-
+        // The codebase still defaults to one AVPlayer per video (per AGENTS.md
+        // "ViewModel lifecycle in NavigationStack", docs/agents/architecture.md); the KVO is a defence-in-
         // depth measure for the AirPlay path and any future swap sites.
         func observeEnd(of playerItem: AVPlayerItem, playerVC: AVPlayerViewController) {
             self.playerVC = playerVC
