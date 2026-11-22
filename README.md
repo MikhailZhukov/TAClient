@@ -132,7 +132,7 @@ If your server uses a self-signed certificate or plain HTTP on a local network, 
 
 ## AI Attribution
 
-The majority of this project was built collaboratively with [Claude Code](https://claude.com/claude-code) (Anthropic).
+The majority of this project was built collaboratively with [Claude Code](https://claude.com/claude-code) (Anthropic), [Qwen](https://qwen.ai/) (Qwen3-27b), and [Kimi](https://www.kimi.com/) (Moonshot AI).
 
 The app icon was generated with ChatGPT (OpenAI).
 
