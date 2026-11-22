@@ -1,5 +1,5 @@
-import Testing
 import Foundation
+import Testing
 @testable import TAClient
 
 struct StartupOutcomeTests {
@@ -36,6 +36,12 @@ struct StartupOutcomeTests {
     @Test func classify_unknown_returnsUnavailable() {
         let error = AppError.unknown(message: "x")
         #expect(StartupOutcome.classify(error) == .unavailable)
+    }
+
+    @Test func classify_permissionDenied_returnsUnavailable() {
+        // A 403-with-live-token surfaces as a banner, not a logout — it must
+        // never classify as a startup-level unauthorized wipe.
+        #expect(StartupOutcome.classify(AppError.permissionDenied) == .unavailable)
     }
 
     @Test func classify_rawURLError_returnsUnavailable() {

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TAClient — iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 104 app files + 1 Share Extension file, 53 test files, ~610 passing tests (excluding `testLaunchPerformance` — known XCUITest perf-metric flake unrelated to project code). Licensed under Apache-2.0 (MobileVLCKit remains under LGPL-2.1-or-later — see `NOTICE`).
+TAClient — iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 109 app files + 1 Share Extension file, 62 test files, ~730 tests (per `@Test` attribute count; verify passing count with the full suite run). Licensed under Apache-2.0 (MobileVLCKit remains under LGPL-2.1-or-later — see `NOTICE`).
 
 ## Build & Run
 
@@ -59,10 +59,10 @@ DI/        → DependencyContainer (manual singleton)
 
 **Key patterns:**
 - `@Observable` ViewModels (iOS 17+) — no `@Published` needed
-- `AppRouter` (@Observable) manages app state (splash → login → main), `NavigationStack` path via typed `Route` enum, cross-screen state sync (`deletedVideoIds`, `watchedChanges`), and `handleError()` helper for DRY error handling across all ViewModels
+- `AppRouter` (@Observable) manages app state (splash → login → main / unavailable reconnect), `NavigationStack` path via typed `Route` enum, cross-screen state sync (`deletedVideoIds`, `watchedChanges`), and `handleError()` helper for DRY error handling across all ViewModels
 - `ImageCache` actor with `AuthenticatedAsyncImage` for auth'd image loading; negative result caching (60s cooldown) to prevent retry storms
 - `AuthState` (@Observable) wraps Keychain reads/writes for token + serverURL
-- Unauthorized (401/403) responses trigger `router.handleUnauthorized()` which clears Keychain and returns to login. Data-layer components (`VideoCachePreloader`, `CachingResourceLoader`) post `Notification.Name.taAuthUnauthorized` (defined in `Domain/Util/Notification+Names.swift`) instead of holding a router reference — `AppRouter` subscribes on init and routes the event through its idempotent `handleUnauthorized()`, preserving Clean Architecture boundaries
+- A 401 (or 403 the ping probe proves is a dead token) triggers `router.handleUnauthorized()` which clears Keychain and returns to login; a 403 with a live token surfaces as an `AppError.permissionDenied` banner without logout (see Session Resilience below). Data-layer components (`VideoCachePreloader`, `CachingResourceLoader`) post `Notification.Name.taAuthUnauthorized` (defined in `Domain/Util/Notification+Names.swift`) instead of holding a router reference — `AppRouter` subscribes on init and routes the event through its idempotent `handleUnauthorized()`, preserving Clean Architecture boundaries
 - `scenePhase` observer in `TAClientApp` forces window layout on `.active` — fixes stale safe area insets after iPad wake from sleep
 - Deleted videos removed from all lists (VideoList, ChannelDetail, Search) via `AppRouter.deletedVideoIds` + `.onChange` observers — no full reload needed
 - Watched state synced across screens via `AppRouter.watchedChanges: [String: Bool]` + `.onChange` observers
@@ -199,6 +199,39 @@ Stable-scroll polling contract — the list must not "jump to the top" during ac
 | GET | `/api/task/by-name/download_pending/` | Download notifications |
 | POST | `/api/task/by-id/{id}/` | Kill task `{"command": "stop"}` |
 
+## Session Resilience
+
+Startup and auth-failure semantics — a live session must only be destroyed by a **proven-expired**
+token, never by an offline server, a 403 with a valid token, or a late response from an old token.
+
+- **Startup classification (A):** `StartupOutcome.classify` (`Domain/Util/StartupOutcome.swift`)
+  maps ONLY `AppError.unauthorized` to `.unauthorized`; every other error (network, 5xx, decoding,
+  HTML-200 from a proxy) is `.unavailable`. `AppRouter.attemptStartup()` runs
+  `authRepository.ping()` → on `.unavailable` sets `AppState.unavailable` (credentials untouched,
+  `onStartupUnavailable()`); on success fetches the user account, and a non-`.unauthorized`
+  account failure logs and continues unprivileged (matches the old `try?` behavior). RootView
+  renders `ReconnectView` (server name + Retry + Change Server behind a destructive
+  `.confirmationDialog`) for `.unavailable`. Only `.unauthorized` wipes via `handleUnauthorized()`.
+- **403 semantics (B):** `APIClient.rawRequest` — 401 → `.unauthorized`; 403 → if the endpoint is
+  `.ping` throw `.unauthorized` (no recursion), else `probeTokenAlive()` (direct GET `/api/ping/`
+  with the current token, NOT routed through `request<T>`): pong + `user > 0` →
+  `AppError.permissionDenied` (banner via `handleError`'s generic branch, no logout); any probe
+  failure → `.unauthorized`. `AppError` has a `permissionDenied` case (`error_permission_denied`,
+  en + ru).
+- **Stale-token guards (E):** a 401/403 whose request carried a **since-replaced** token must not
+  revoke the new session. Ordering in `rawRequest` is load-bearing: stale check
+  (`sentToken != authState.token` → neutral `AppError.network`) runs BEFORE both the 401 mapping
+  and the 403 probe. The same guard exists at the two non-APIClient doors —
+  `CachingResourceLoader.handleUnauthorizedIfNeeded` and `VideoCachePreloader` (HEAD probe +
+  download post-sites) — via an `isTokenCurrent: (@Sendable (String) -> Bool)?` closure; **default
+  nil = legacy behavior** (always post `.taAuthUnauthorized`). Production wiring captures ONE
+  shared `KeychainService` instance per closure (loader in `makeCachingAsset`, preloader in
+  `VideoCachePreloader.shared`) — `isCurrentAuthToken` returns `true` on keychain READ failure
+  (staleness can never be proven from a failed read, so the revoke path stays conservative).
+- **`KeychainService` is `nonisolated final class`** (immutable `let` storage; SecItem is
+  thread-safe — CacheStore pattern) exposing `isCurrentAuthToken(_:)` so nonisolated data-layer
+  objects can check token currency without a MainActor hop.
+
 ## Video Playback
 
 Two player paths, selected automatically by `CodecSupport.requiredPlayer(for:)`:
@@ -254,7 +287,7 @@ Two player paths, selected automatically by `CodecSupport.requiredPlayer(for:)`:
 - **Restart contract for memory-pressure recovery — trigger**: the VM's 1Hz time observer (`VideoDetailViewModel.swift`, inside `registerPlayerObservers`) evaluates `RestartTrigger.shouldRestart` — a pure-function predicate that returns true when `.main`'s cached byte count is below 16MB AND at least 15s have elapsed since the last restart attempt. On true, the observer dispatches `VideoCachePreloader.restartPreloadIfNeeded(videoId:url:token:startPosition:duration:)` as a fire-and-forget Task hop. The hook is **idempotent** — the preloader no-ops if a preload is already in flight, if no entry exists for the videoId, or if the computed byte offset is at/past `totalSize`. The cooldown lives solely on the VM side (`lastRestartAt` under `progressStateLock`); the preloader trusts the VM to throttle. AirPlay skips restart entirely at the evaluator level (`isUsingDirectAsset` early-bail) for the same reason reseed does — direct-asset playback bypasses the cache.
 - **Restart orchestration (actor)**: `restartPreloadIfNeeded` first calls `store.resetMainRegion(videoId:newStartOffset: byteForStartPosition)` to drop any post-`.critical`-trim leftover bytes that are at the wrong anchor (without this, `startPreloadWithRetry`'s internal `isCacheSufficient` check could short-circuit on stale-anchored cache and silently no-op). It then calls `startPreloadWithRetry(...)` from the **current playhead position** (NOT byte 0) — restart rebuilds main where the user actually is, not where the original `loadVideo` started. The bytes sacrificed by the `resetMainRegion` (at most `criticalTrimTargetBytes`, currently 8 MB) are an acceptable cost — they were at the wrong anchor anyway.
 - **Restart + reseed compose**: the two hooks are independent and complementary. Restart rebuilds the region when it's been emptied or destroyed (post-`.critical` recovery, or any other path that leaves main thin). Reseed re-anchors the region when the user scrubs far outside main's current `[startOffset, endOffset)`. Reseed requires main to exist (`preloadTask != nil` orphan guard); restart bootstraps that precondition by recreating main after a `.critical` trim. Without restart, the new reseed-trigger would bail forever after `.critical` because `regionStatus(.main)` would stay `nil`.
-- 401/403 from the preloader download or the loader network fallback posts `.taAuthUnauthorized` (see API Details).
+- 401/403 from the preloader download or the loader network fallback posts `.taAuthUnauthorized` (see API Details) — EXCEPT when the request carried a since-replaced token (`isTokenCurrent` guard, see Session Resilience above); stale responses are silently ignored.
 
 **Important — do NOT:**
 - Set `automaticallyWaitsToMinimizeStalling` on AVPlayer — caused playback issues
@@ -343,16 +376,16 @@ Automatic skip of sponsor segments and other non-content sections during playbac
 
 ## Testing
 
-**~610 tests, all passing** (excluding `testLaunchPerformance` — known XCUITest perf-metric flake unrelated to project code). Swift Testing framework (`@Test`, `#expect()`) — NOT XCTest.
+**~730 tests** (per `@Test` attribute count; confirm all passing with the full suite run — `testLaunchPerformance` is a known XCUITest perf-metric flake unrelated to project code). Swift Testing framework (`@Test`, `#expect()`) — NOT XCTest.
 
-Phase counts below are approximate scope buckets, not exact tallies — suites have grown organically and a number of cross-cutting suites (`AppRouterTests`, `AuthStateTests`, `NotificationTests`, `SponsorBlock*Tests`, `UserPrivilegesTests`, `PlayerGestureTests`, `SimilarVideosTests`, several ViewModel suites, etc.) cover behaviour spanning multiple phases. Only the ~610 total is canonical.
+Phase counts below are approximate scope buckets, not exact tallies — suites have grown organically and a number of cross-cutting suites (`AppRouterTests`, `AuthStateTests`, `NotificationTests`, `SponsorBlock*Tests`, `UserPrivilegesTests`, `PlayerGestureTests`, `SimilarVideosTests`, several ViewModel suites, etc.) cover behaviour spanning multiple phases. Only the ~730 total (attribute count) is canonical.
 
 | Phase | Tests | Scope |
 |-------|-------|-------|
-| 1 ✅ | ~58 | Pure logic: mappers, codecs, errors, date formatting |
-| 2 ✅ | ~71 | ViewModels + services with closure-based mock repos |
-| 3 ✅ | ~79 | Data layer: APIClient, endpoints, all repository impls via MockURLProtocol |
-| 4 ✅ | ~130 | Playback + cache: `CacheStoreTests` (32+ sync-API tests, incl. 9 `resetMain_*` cases for the preloader-reseed contract — replaces, clamps below prefix, clamps at/above totalSize, wrongVideoId noop, missingEntry noop, doesNotResetLastPlaybackOffset, clampedEqualsPreviousStart preserves main, clampedAboveStart still wipes, smallFileNoMain noop), `CacheStoreStressTests` (concurrent readers/writer + `resetMain_concurrentWithWrite_noCorruption` under `@Suite(.serialized)`), `CachingResourceLoaderTests`, `CacheAuthFailureTests` (401/403 → `.taAuthUnauthorized`), `VideoCachePreloaderTests` (baseline + memory pressure + HEAD-probe success and HEAD-probe 401 + 10 `reseedMain_*` cases — resetsMainRegion, downloadsCorrectRange, wrongVideoId noop, atByteAtOrAboveTotal noop, noMainRegion noop, oldTaskCompletionDoesNotClobber, afterCancelPreload noop, backwardIntoPrefix preservesMain, postReseedBytesAreFromNewRange byte-content verification, loaderGraceWindowStillFires), `PlayerSessionCoordinatorTests`, `NowPlayingControllerTests`, `ObserverBagTests`, `StreamingSessionTests`, `ReseedTriggerTests` (14 cases on pure `shouldReseed` / `shouldDebounce` decision logic), `SnapshotPlaybackContextTests` (5 cases pinning the `streamingURL` / `authToken` locked-write helper), `ReseedDispatchEvaluationTests` (8 cases on the `evaluateReseedDispatch` seam — debounce, nil-guard, paused-scrub, inside-main, no-region) |
+| 1 ✅ | ~67 | Pure logic: mappers, codecs, errors, date formatting + `StartupOutcomeTests` (9 classification cases — only `.unauthorized` → wipe, everything else incl. `.permissionDenied` → `.unavailable`) + `AppErrorTests.permissionDenied` |
+| 2 ✅ | ~78 | ViewModels + services with closure-based mock repos + `AppRouterTests.attemptStartup_*` (7 cases: ping/account ok, ping `.unauthorized` → wipe+login, ping network → `.unavailable` token kept, account `.unauthorized` → wipe, account network → unprivileged continue, non-pong ping → `.unavailable`, `onStartupUnavailable` keeps credentials) |
+| 3 ✅ | ~89 | Data layer: APIClient, endpoints, all repository impls via MockURLProtocol + 403-probe cases (`pingAlive` → `.permissionDenied`, ping 401 / ping network fail / ping non-pong / ping anonymous (user 0 or absent) → `.unauthorized`, 403 with nil token still probes, 401 does not ping, 403-on-ping no recursion) + stale-door cases (401/403 token replaced in flight → `.network` without probe, same-token regression pin, nil-token skips stale check) + `AppRouterTests.handleError` (`.permissionDenied` → banner without logout; `.unauthorized` → logout) |
+| 4 ✅ | ~139 | Playback + cache: `CacheStoreTests` (32+ sync-API tests, incl. 9 `resetMain_*` cases for the preloader-reseed contract — replaces, clamps below prefix, clamps at/above totalSize, wrongVideoId noop, missingEntry noop, doesNotResetLastPlaybackOffset, clampedEqualsPreviousStart preserves main, clampedAboveStart still wipes, smallFileNoMain noop), `CacheStoreStressTests` (concurrent readers/writer + `resetMain_concurrentWithWrite_noCorruption` under `@Suite(.serialized)`), `CachingResourceLoaderTests`, `CacheAuthFailureTests` (401/403 → `.taAuthUnauthorized` + 12 stale-guard cases — preloader HEAD-probe 401 stale/nil-legacy/current, GET 401 stale/nil-legacy/current, GET 403 stale/current; loader 401 stale/current, 403 stale/current), `VideoCachePreloaderTests` (baseline + memory pressure + HEAD-probe success and HEAD-probe 401 + 10 `reseedMain_*` cases — resetsMainRegion, downloadsCorrectRange, wrongVideoId noop, atByteAtOrAboveTotal noop, noMainRegion noop, oldTaskCompletionDoesNotClobber, afterCancelPreload noop, backwardIntoPrefix preservesMain, postReseedBytesAreFromNewRange byte-content verification, loaderGraceWindowStillFires), `PlayerSessionCoordinatorTests`, `NowPlayingControllerTests`, `ObserverBagTests`, `StreamingSessionTests`, `ReseedTriggerTests` (14 cases on pure `shouldReseed` / `shouldDebounce` decision logic), `SnapshotPlaybackContextTests` (5 cases pinning the `streamingURL` / `authToken` locked-write helper), `ReseedDispatchEvaluationTests` (8 cases on the `evaluateReseedDispatch` seam — debounce, nil-guard, paused-scrub, inside-main, no-region) |
 | 5 ✅ | ~52 | Navigation lifecycle + Coordinator state machine: `WrapperLifecycleTests` — factory-counting tests for each `*Screen` wrapper (one-shot + two-instance) defending the screen-wrapper structural contract; `FullscreenExitGuardTests` — 7 `shouldResumePlayback` cases + 9 `shouldClampToEnd` cases (boolean predicate matrix: end signal × duration validity (incl. negative) × time control status, plus mutual-exclusivity sanity check vs `shouldResumePlayback` with positive-coverage anchors so a regression that drove BOTH predicates to `false` everywhere would fail); `ShouldClearEndFlagTests` — 11 cases for the `timeJumpedNotification`-driven `didPlayToEnd` reset predicate covering Replay-to-zero (clear), AVKit drift-back-from-end at 4-8s (KEEP — load-bearing because AVKit's drift is precisely what `shouldClampToEnd` exists to fix), threshold boundary at 1.0, mid-playback, plus defensive shape (NaN / zero / negative / infinite duration, NaN currentTime); `CoordinatorEndFlagWiringTests` — Mirror-reflection tests for the `didPlayToEnd` flag mutation paths (initial false, set on `AVPlayerItemDidPlayToEndTime`, reset on `observeEnd` rewire); `SeekTimestampInitTests` — 4 cases for the init invariant (Mirror over `nonisolated(unsafe)` storage) plus the static `resetExplicitSeekTimestamp()` helper (the `stopPlayback()` reset path's testable seam) |
 
 **Test infrastructure:**

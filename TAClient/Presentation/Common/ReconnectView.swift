@@ -14,19 +14,23 @@ struct ReconnectView: View {
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "wifi.exclamationmark")
-                .font(.system(size: 48))
+                .font(.largeTitle)
                 .foregroundStyle(.secondary)
             Text(String(localized: "reconnect_title"))
                 .font(.headline)
-            Text(serverName)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            if !serverName.isEmpty {
+                Text(serverName)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
             if isRetrying {
                 ProgressView()
             }
             Button(String(localized: "reconnect_retry")) {
+                isRetrying = true
                 Task {
-                    isRetrying = true
                     await retry()
                     isRetrying = false
                 }
@@ -37,6 +41,10 @@ struct ReconnectView: View {
                 showChangeServerConfirmation = true
             }
             .foregroundStyle(.secondary)
+            // Disabled while a retry is in flight: confirming a server change
+            // wipes credentials, and a late `attemptStartup()` completion must
+            // not flip to `.authenticated` with an empty keychain.
+            .disabled(isRetrying)
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)

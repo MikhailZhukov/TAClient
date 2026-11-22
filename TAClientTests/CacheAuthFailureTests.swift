@@ -257,6 +257,62 @@ extension DataLayerSuite {
     // "current token -> post" contract; the loader section's nil-closure
     // tests pin legacy always-post wiring.
 
+    @Test func preloader_get401_nilTokenCheck_postsNotification_legacy() async {
+        VideoCachePreloader.testSessionConfigurationOverride = MockResponse.makeConfiguration()
+        MockResponse.setUp(statusCode: 401, data: Data())
+        defer {
+            VideoCachePreloader.testSessionConfigurationOverride = nil
+            MockResponse.tearDown()
+        }
+
+        // Default `isTokenCurrent: nil` — the GET branch's legacy path must
+        // preserve the pre-guard behavior (post on 401).
+        let preloader = VideoCachePreloader()
+        let expectation = NotificationExpectation(
+            name: .taAuthUnauthorized,
+            senderId: "vid-legacy-get-preload"
+        )
+
+        await preloader.startPreloadWithRetry(
+            videoId: "vid-legacy-get-preload",
+            url: URL(string: "https://ta.example.com/media/vid-legacy-get.mp4")!,
+            token: "test-token",
+            startPosition: 0,
+            duration: 0,
+            maxRetries: 0
+        )
+
+        let fired = await expectation.wait(timeoutSeconds: 5)
+        #expect(fired, "Nil isTokenCurrent (legacy) GET 401 must still post .taAuthUnauthorized")
+    }
+
+    @Test func preloader_get403_currentToken_postsNotification() async {
+        VideoCachePreloader.testSessionConfigurationOverride = MockResponse.makeConfiguration()
+        MockResponse.setUp(statusCode: 403, data: Data())
+        defer {
+            VideoCachePreloader.testSessionConfigurationOverride = nil
+            MockResponse.tearDown()
+        }
+
+        let preloader = VideoCachePreloader(isTokenCurrent: { $0 == "live-token" })
+        let expectation = NotificationExpectation(
+            name: .taAuthUnauthorized,
+            senderId: "vid-current-403-preload"
+        )
+
+        await preloader.startPreloadWithRetry(
+            videoId: "vid-current-403-preload",
+            url: URL(string: "https://ta.example.com/media/vid-current-403.mp4")!,
+            token: "live-token",
+            startPosition: 0,
+            duration: 0,
+            maxRetries: 0
+        )
+
+        let fired = await expectation.wait(timeoutSeconds: 5)
+        #expect(fired, "Current-token GET 403 must still post .taAuthUnauthorized")
+    }
+
     // MARK: - CachingResourceLoader
 
     @Test func cachingResourceLoader_on401_postsUnauthorizedNotification() async {
@@ -366,6 +422,32 @@ extension DataLayerSuite {
 
         let fired = await expectation.wait(timeoutSeconds: 2)
         #expect(fired, "Current-token 401 must still post .taAuthUnauthorized")
+    }
+
+    @Test func cachingResourceLoader_on403_currentToken_postsNotification() async {
+        let loader = CachingResourceLoader(
+            videoId: "vid-current-403-loader",
+            originalURL: URL(string: "https://ta.example.com/media/vid-current-403-loader.mp4")!,
+            token: "live-token",
+            isTokenCurrent: { $0 == "live-token" }
+        )
+
+        let expectation = NotificationExpectation(
+            name: .taAuthUnauthorized,
+            senderId: "vid-current-403-loader"
+        )
+
+        let http403 = HTTPURLResponse(
+            url: URL(string: "https://ta.example.com/media/vid-current-403-loader.mp4")!,
+            statusCode: 403,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        let wasUnauthorized = loader.handleUnauthorizedIfNeeded(response: http403)
+        #expect(wasUnauthorized)
+
+        let fired = await expectation.wait(timeoutSeconds: 2)
+        #expect(fired, "Current-token 403 must still post .taAuthUnauthorized")
     }
 
     @Test func cachingResourceLoader_on403_staleToken_doesNotPostNotification() async {

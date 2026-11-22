@@ -1,6 +1,8 @@
 import SwiftUI
 import OSLog
 
+private let logger = Logger(subsystem: "ru.mzhukov.TAClient", category: "AppRouter")
+
 enum AppState {
     case splash
     case login
@@ -17,7 +19,6 @@ final class AppRouter {
 
     private let authState: AuthState
     private let authRepository: AuthRepositoryProtocol
-    private let logger = Logger(subsystem: "ru.mzhukov.TAClient", category: "AppRouter")
     private var didHandleUnauth: Bool = false
     @ObservationIgnored private var unauthorizedObserver: NSObjectProtocol?
 

@@ -328,13 +328,13 @@
 
 ### Task 10: Update documentation
 
-- [ ] CLAUDE.md: новый блок «Session Resilience» (startup classification + `AppState.unavailable`/
+- [x] CLAUDE.md: новый блок «Session Resilience» (startup classification + `AppState.unavailable`/
       `ReconnectView` + `AppRouter.attemptStartup`); в «API Details» — семантика 403
       (ping-проба, `permissionDenied`, порядок stale-чека); `KeychainService` — nonisolated;
       stale-token guards (три двери, `isCurrentAuthToken`, default nil = legacy);
-      `AppError.permissionDenied` case
-- [ ] CLAUDE.md: обновить фазу 3/тест-список (новые suites)
-- [ ] Переместить план в `docs/plans/completed/` (каталог существует)
+      `AppError.permissionDenied` case [сделано: единый блок «Session Resilience» перед «Video Playback» — все пункты, включая семантику 403, покрыты в нём; anchors сверены с кодом]
+- [x] CLAUDE.md: обновить фазу 3/тест-список (новые suites) [сделано: фазы 1–4 — StartupOutcomeTests (8), AppErrorTests.permissionDenied, attemptStartup_* (7), APIClient 403-probe/stale-door (10), CacheAuthFailureTests stale-guard (9); счётчики фаз 58→67 / 71→78 / 79→89 / 130→139]
+- [x] Переместить план в `docs/plans/completed/` (каталог существует) [done by harness after all phases]
 
 ## Post-Completion
 

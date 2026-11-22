@@ -12,7 +12,11 @@ private nonisolated let logger = Logger(subsystem: "ru.mzhukov.TAClient", catego
 /// `store` directly (sync, NSLock-guarded); this actor is strictly a
 /// download orchestrator that owns lifecycle of the in-flight HTTP task.
 actor VideoCachePreloader {
-    static let shared = VideoCachePreloader()
+    static let shared = VideoCachePreloader(isTokenCurrent: { VideoCachePreloader.keychain.isCurrentAuthToken($0) })
+
+    /// One instance for the production guard closure — KeychainService is
+    /// `nonisolated` with immutable storage, safe to share.
+    private static let keychain = KeychainService()
 
     /// Synchronous storage — exposed to the actor and to the
     /// `CachingResourceLoader`. All mutable state lives behind its `NSLock`.
@@ -142,7 +146,16 @@ actor VideoCachePreloader {
     /// already restricts visibility to test-linked builds.
     nonisolated(unsafe) static var testSessionConfigurationOverride: URLSessionConfiguration?
 
-    private init() {
+    /// Stale-token guard: returns true when a request's token is still the
+    /// credential in the keychain. When set and returning false, a 401/403
+    /// from a download is silently ignored (the connection it belonged to
+    /// has been replaced). nil = legacy behavior (always post
+    /// `.taAuthUnauthorized`). The production value consults the keychain
+    /// directly (KeychainService is `nonisolated`, SecItem is thread-safe).
+    private let isTokenCurrent: (@Sendable (String) -> Bool)?
+
+    init(isTokenCurrent: (@Sendable (String) -> Bool)? = nil) {
+        self.isTokenCurrent = isTokenCurrent
         let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .global())
         memoryPressureSource = source
         source.setEventHandler { [weak self] in
@@ -683,10 +696,17 @@ actor VideoCachePreloader {
         }
 
         if http.statusCode == 401 || http.statusCode == 403 {
-            logger.error("Preload HEAD unauthorized for \(videoId): \(http.statusCode)")
-            // Post with `videoId` as `object` so tests can scope
-            // observers by sender and avoid cross-test bleed.
-            NotificationCenter.default.post(name: .taAuthUnauthorized, object: videoId)
+            if let isTokenCurrent, !isTokenCurrent(token) {
+                // Stale token: the connection this preload belongs to has
+                // been replaced (server switch) — bail without revoking the
+                // live session.
+                logger.error("Stale token for \(videoId): \(http.statusCode) — connection replaced, ignoring")
+            } else {
+                logger.error("Preload HEAD unauthorized for \(videoId): \(http.statusCode)")
+                // Post with `videoId` as `object` so tests can scope
+                // observers by sender and avoid cross-test bleed.
+                NotificationCenter.default.post(name: .taAuthUnauthorized, object: videoId)
+            }
             return nil
         }
         guard (200...299).contains(http.statusCode) else {
@@ -747,8 +767,15 @@ actor VideoCachePreloader {
         let (httpResponse, chunks) = try await streamer.stream(request: request, configuration: config)
 
         if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
-            logger.error("Preload (\(region.name)) unauthorized for \(videoId): \(httpResponse.statusCode)")
-            NotificationCenter.default.post(name: .taAuthUnauthorized, object: videoId)
+            if let isTokenCurrent, !isTokenCurrent(token) {
+                // Stale token: the connection this preload belongs to has
+                // been replaced (server switch) — bail without revoking the
+                // live session.
+                logger.error("Stale token for \(videoId): \(httpResponse.statusCode) — connection replaced, ignoring")
+            } else {
+                logger.error("Preload (\(region.name)) unauthorized for \(videoId): \(httpResponse.statusCode)")
+                NotificationCenter.default.post(name: .taAuthUnauthorized, object: videoId)
+            }
             return
         }
 

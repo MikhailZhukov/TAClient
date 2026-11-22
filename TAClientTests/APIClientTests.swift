@@ -50,6 +50,26 @@ extension DataLayerSuite {
 
     // MARK: - 403 ping probe (session resilience B)
 
+    /// Shared 401/403-mapping assertion: runs `operation`, requires an
+    /// `AppError` matching `matcher`, records an issue otherwise.
+    private func expectAppError<T>(
+        _ expected: String,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        operation: () async throws -> T,
+        matcher: (AppError) -> Bool
+    ) async {
+        do {
+            _ = try await operation()
+            Issue.record("Expected AppError.\(expected)", sourceLocation: sourceLocation)
+        } catch let error as AppError {
+            if !matcher(error) {
+                Issue.record("Expected AppError.\(expected), got \(error)", sourceLocation: sourceLocation)
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)", sourceLocation: sourceLocation)
+        }
+    }
+
     @Test func request_403_pingAlive_throwsPermissionDenied() async {
         let (client, authState) = MockResponse.makeAPIClient()
         nonisolated(unsafe) var pingCount = 0
@@ -62,15 +82,11 @@ extension DataLayerSuite {
         }
         defer { MockResponse.tearDown() }
 
-        do {
-            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
-            Issue.record("Expected AppError.permissionDenied")
-        } catch let error as AppError {
-            if case .permissionDenied = error {} else {
-                Issue.record("Expected .permissionDenied, got \(error)")
-            }
-        } catch {
-            Issue.record("Unexpected error: \(error)")
+        await expectAppError("permissionDenied") {
+            try await client.request(endpoint: .downloadList(page: 1, filter: "pending")) as Data
+        } matcher: { error in
+            if case .permissionDenied = error { return true }
+            return false
         }
         #expect(pingCount == 1)
         #expect(authState.token == "test-token")
@@ -86,15 +102,11 @@ extension DataLayerSuite {
         }
         defer { MockResponse.tearDown() }
 
-        do {
-            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
-            Issue.record("Expected AppError.unauthorized")
-        } catch let error as AppError {
-            if case .unauthorized = error {} else {
-                Issue.record("Expected .unauthorized, got \(error)")
-            }
-        } catch {
-            Issue.record("Unexpected error: \(error)")
+        await expectAppError("unauthorized") {
+            try await client.request(endpoint: .downloadList(page: 1, filter: "pending")) as Data
+        } matcher: { error in
+            if case .unauthorized = error { return true }
+            return false
         }
     }
 
@@ -108,15 +120,11 @@ extension DataLayerSuite {
         }
         defer { MockResponse.tearDown() }
 
-        do {
-            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
-            Issue.record("Expected AppError.unauthorized")
-        } catch let error as AppError {
-            if case .unauthorized = error {} else {
-                Issue.record("Expected .unauthorized, got \(error)")
-            }
-        } catch {
-            Issue.record("Unexpected error: \(error)")
+        await expectAppError("unauthorized") {
+            try await client.request(endpoint: .downloadList(page: 1, filter: "pending")) as Data
+        } matcher: { error in
+            if case .unauthorized = error { return true }
+            return false
         }
     }
 
@@ -130,16 +138,63 @@ extension DataLayerSuite {
         }
         defer { MockResponse.tearDown() }
 
-        do {
-            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
-            Issue.record("Expected AppError.unauthorized")
-        } catch let error as AppError {
-            if case .unauthorized = error {} else {
-                Issue.record("Expected .unauthorized, got \(error)")
-            }
-        } catch {
-            Issue.record("Unexpected error: \(error)")
+        await expectAppError("unauthorized") {
+            try await client.request(endpoint: .downloadList(page: 1, filter: "pending")) as Data
+        } matcher: { error in
+            if case .unauthorized = error { return true }
+            return false
         }
+    }
+
+    @Test func request_403_pingAnonymousUser_throwsUnauthorized() async {
+        // pong WITHOUT an authenticated user means the token did not
+        // authenticate — the probe must NOT report the token alive.
+        let (client, _) = MockResponse.makeAPIClient()
+        nonisolated(unsafe) var pingCount = 0
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path == "/api/ping" {
+                pingCount += 1
+                return (MockResponse.httpResponse(statusCode: 200), MockResponse.json(["response": "pong", "user": 0]))
+            }
+            return (MockResponse.httpResponse(statusCode: 403), MockResponse.json(["detail": "Forbidden"]))
+        }
+        defer { MockResponse.tearDown() }
+
+        await expectAppError("unauthorized") {
+            try await client.request(endpoint: .downloadList(page: 1, filter: "pending")) as Data
+        } matcher: { error in
+            if case .unauthorized = error { return true }
+            return false
+        }
+        #expect(pingCount == 1)
+    }
+
+    @Test func request_403_noTokenInFlight_skipsProbe_throwsUnauthorized() async {
+        // Fixture: serverURL set, token nil — sentToken == nil so the stale
+        // check is skipped; the 403 then reaches the probe, which short-
+        // circuits without a token (pinging unauthenticated is meaningless)
+        // → .unauthorized, and zero ping requests are issued.
+        let keychain = KeychainService()
+        keychain.clearAll()
+        keychain.save("https://ta.example.com", for: .serverURL)
+        let authState = AuthState(keychainService: keychain)
+        let (client, _) = MockResponse.makeAPIClient(authState: authState)
+        nonisolated(unsafe) var pingCount = 0
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path == "/api/ping" {
+                pingCount += 1
+            }
+            return (MockResponse.httpResponse(statusCode: 403), MockResponse.json(["detail": "Forbidden"]))
+        }
+        defer { MockResponse.tearDown() }
+
+        await expectAppError("unauthorized") {
+            try await client.request(endpoint: .downloadList(page: 1, filter: "pending")) as Data
+        } matcher: { error in
+            if case .unauthorized = error { return true }
+            return false
+        }
+        #expect(pingCount == 0, "403 with nil sentToken must skip the probe — pinging without a token is meaningless")
     }
 
     @Test func request_401_doesNotPing() async {
@@ -168,33 +223,16 @@ extension DataLayerSuite {
         }
         defer { MockResponse.tearDown() }
 
-        do {
+        await expectAppError("unauthorized") {
             let _: PingDTO = try await client.request(endpoint: .ping)
-            Issue.record("Expected AppError.unauthorized")
-        } catch let error as AppError {
-            if case .unauthorized = error {} else {
-                Issue.record("Expected .unauthorized, got \(error)")
-            }
-        } catch {
-            Issue.record("Unexpected error: \(error)")
+        } matcher: { error in
+            if case .unauthorized = error { return true }
+            return false
         }
         #expect(totalCount == 1)
     }
 
     // MARK: - Stale-token door (session resilience E)
-
-    private func expectStaleAuthThrowsNetwork(client: APIClient) async {
-        do {
-            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
-            Issue.record("Expected AppError.network")
-        } catch let error as AppError {
-            if case .network = error {} else {
-                Issue.record("Expected .network, got \(error)")
-            }
-        } catch {
-            Issue.record("Unexpected error: \(error)")
-        }
-    }
 
     @Test func request_401_tokenReplacedInFlight_throwsNetwork() async {
         let (client, authState) = MockResponse.makeAPIClient()
@@ -209,13 +247,28 @@ extension DataLayerSuite {
                     authState.setCredentials(token: "token-B", serverURL: "https://ta.example.com")
                     mutationDone.signal()
                 }
-                mutationDone.wait(timeout: .now() + 5)
+                let signaled = mutationDone.wait(timeout: .now() + 5)
+                // A false wait result means MainActor never ran the swap and
+                // the test would silently exercise the non-stale path.
+                if !signaled {
+                    Issue.record("Credential swap semaphore timed out")
+                }
             }
             return (MockResponse.httpResponse(statusCode: 401), MockResponse.json(["detail": "Invalid token"]))
         }
-        defer { MockResponse.tearDown() }
+        defer {
+            MockResponse.tearDown()
+            // Restore the shared keychain fixture so later suites see
+            // "test-token", not the in-flight "token-B" residue.
+            KeychainService().save("test-token", for: .authToken)
+        }
 
-        await expectStaleAuthThrowsNetwork(client: client)
+        await expectAppError("network") {
+            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
+        } matcher: { error in
+            if case .network = error { return true }
+            return false
+        }
     }
 
     @Test func request_403_tokenReplacedInFlight_throwsNetworkWithoutProbe() async {
@@ -231,13 +284,66 @@ extension DataLayerSuite {
                 authState.setCredentials(token: "token-B", serverURL: "https://ta.example.com")
                 mutationDone.signal()
             }
-            mutationDone.wait(timeout: .now() + 5)
+            let signaled = mutationDone.wait(timeout: .now() + 5)
+            if !signaled {
+                Issue.record("Credential swap semaphore timed out")
+            }
             return (MockResponse.httpResponse(statusCode: 403), MockResponse.json(["detail": "Forbidden"]))
         }
-        defer { MockResponse.tearDown() }
+        defer {
+            MockResponse.tearDown()
+            // Restore the shared keychain fixture so later suites see
+            // "test-token", not the in-flight "token-B" residue.
+            KeychainService().save("test-token", for: .authToken)
+        }
 
-        await expectStaleAuthThrowsNetwork(client: client)
+        await expectAppError("network") {
+            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
+        } matcher: { error in
+            if case .network = error { return true }
+            return false
+        }
         #expect(pingCount == 0, "Stale check must run before the 403 ping probe")
+    }
+
+    @Test func request_403_tokenReplacedDuringProbe_throwsNetwork_notUnauthorized() async {
+        // The credential swap lands while the ping probe is in flight (the
+        // probe's "dead" verdict then applies to the OLD session). The post-
+        // probe stale re-check must convert the would-be .unauthorized wipe
+        // into a neutral .network. Deterministic for the same reason as the
+        // in-flight tests above: the swap is enqueued on MainActor during
+        // startLoading, and the client's post-probe token read resumes on
+        // MainActor after it.
+        let (client, authState) = MockResponse.makeAPIClient()
+        let mutationDone = DispatchSemaphore(value: 0)
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path == "/api/ping" {
+                Task { @MainActor in
+                    authState.setCredentials(token: "token-B", serverURL: "https://ta.example.com")
+                    mutationDone.signal()
+                }
+                let signaled = mutationDone.wait(timeout: .now() + 5)
+                if !signaled {
+                    Issue.record("Credential swap semaphore timed out")
+                }
+                // Non-pong response → probe reports the token dead.
+                return (MockResponse.httpResponse(statusCode: 200), MockResponse.json(["response": "nope"]))
+            }
+            return (MockResponse.httpResponse(statusCode: 403), MockResponse.json(["detail": "Forbidden"]))
+        }
+        defer {
+            MockResponse.tearDown()
+            // Restore the shared keychain fixture so later suites see
+            // "test-token", not the in-flight "token-B" residue.
+            KeychainService().save("test-token", for: .authToken)
+        }
+
+        await expectAppError("network") {
+            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
+        } matcher: { error in
+            if case .network = error { return true }
+            return false
+        }
     }
 
     @Test func request_401_sameToken_stillUnauthorized() async {
@@ -245,15 +351,11 @@ extension DataLayerSuite {
         MockResponse.setUp(statusCode: 401, json: ["detail": "Invalid token"])
         defer { MockResponse.tearDown() }
 
-        do {
+        await expectAppError("unauthorized") {
             let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
-            Issue.record("Expected AppError.unauthorized")
-        } catch let error as AppError {
-            if case .unauthorized = error {} else {
-                Issue.record("Expected .unauthorized, got \(error)")
-            }
-        } catch {
-            Issue.record("Unexpected error: \(error)")
+        } matcher: { error in
+            if case .unauthorized = error { return true }
+            return false
         }
     }
 
@@ -269,15 +371,11 @@ extension DataLayerSuite {
         MockResponse.setUp(statusCode: 401, json: ["detail": "Invalid token"])
         defer { MockResponse.tearDown() }
 
-        do {
+        await expectAppError("unauthorized") {
             let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
-            Issue.record("Expected AppError.unauthorized")
-        } catch let error as AppError {
-            if case .unauthorized = error {} else {
-                Issue.record("Expected .unauthorized, got \(error)")
-            }
-        } catch {
-            Issue.record("Unexpected error: \(error)")
+        } matcher: { error in
+            if case .unauthorized = error { return true }
+            return false
         }
     }
 

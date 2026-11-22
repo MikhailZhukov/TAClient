@@ -1,5 +1,5 @@
-import SwiftUI
 import Foundation
+import SwiftUI
 import Testing
 @testable import TAClient
 
@@ -90,12 +90,17 @@ struct AppRouterTests {
     }
 
     @Test func attemptStartup_pingOk_accountOk_authenticates() async {
-        let (router, authState, _) = makeStartupRouter()
+        let (router, authState, authRepo) = makeStartupRouter()
+        nonisolated(unsafe) var fetchCount = 0
+        authRepo.fetchUserAccountHandler = {
+            fetchCount += 1
+        }
 
         await router.attemptStartup()
 
         #expect(router.appState == .authenticated)
         #expect(authState.token != nil)
+        #expect(fetchCount == 1, "account fetch must run after a successful ping")
     }
 
     @Test func attemptStartup_pingUnauthorized_wipesAndShowsLogin() async {
@@ -130,7 +135,11 @@ struct AppRouterTests {
 
     @Test func attemptStartup_accountNetworkError_continuesUnprivileged() async {
         let (router, authState, authRepo) = makeStartupRouter()
-        authRepo.fetchUserAccountHandler = { throw AppError.network(underlying: nil) }
+        nonisolated(unsafe) var fetchCount = 0
+        authRepo.fetchUserAccountHandler = {
+            fetchCount += 1
+            throw AppError.network(underlying: nil)
+        }
 
         await router.attemptStartup()
 
@@ -138,6 +147,7 @@ struct AppRouterTests {
         #expect(router.appState == .authenticated)
         #expect(authState.token != nil)
         #expect(authState.isPrivileged == false)
+        #expect(fetchCount == 1, "the failed account fetch must still have been attempted")
     }
 
     @Test func attemptStartup_pingNotPong_showsUnavailable() async {
@@ -158,5 +168,32 @@ struct AppRouterTests {
         #expect(router.appState == .unavailable)
         #expect(authState.token != nil)
         #expect(authState.isAuthenticated)
+    }
+
+    // MARK: - 403 semantics (session resilience B)
+
+    @Test func handleError_permissionDenied_showsBannerWithoutLogout() {
+        let (router, authState, _) = makeStartupRouter()
+        var errorMessage: String? = nil
+
+        let handled = router.handleError(AppError.permissionDenied, errorMessage: &errorMessage)
+
+        #expect(!handled, ".permissionDenied must NOT route through handleUnauthorized")
+        #expect(router.appState == .splash, "app state untouched — no logout")
+        #expect(authState.token != nil, "credentials preserved")
+        #expect(authState.isAuthenticated)
+        #expect(errorMessage != nil, "banner message must be set")
+        #expect(errorMessage == AppError.permissionDenied.errorDescription)
+    }
+
+    @Test func handleError_unauthorized_stillLogsOut() {
+        let (router, authState, _) = makeStartupRouter()
+        var errorMessage: String? = nil
+
+        let handled = router.handleError(AppError.unauthorized, errorMessage: &errorMessage)
+
+        #expect(handled)
+        #expect(router.appState == .login)
+        #expect(authState.token == nil)
     }
 }

@@ -111,8 +111,15 @@ final class APIClient {
             if case .ping = endpoint {
                 throw AppError.unauthorized
             }
-            if await probeTokenAlive() {
+            let probeAlive = await probeTokenAlive(baseURL: base)
+            if probeAlive {
                 throw AppError.permissionDenied
+            }
+            // The probe can race a credential swap: if the token changed
+            // while the probe was in flight, its "dead" verdict applies to
+            // the OLD session — wiping now would revoke the fresh one.
+            if let sentToken, sentToken != authState.token {
+                throw AppError.network(underlying: nil)
             }
             throw AppError.unauthorized
         default:
@@ -126,19 +133,26 @@ final class APIClient {
     /// probe). Returns true only when the server confirms the token is alive
     /// (pong + authenticated user); every failure mode means the session is
     /// dead and maps to `AppError.unauthorized`.
-    private func probeTokenAlive() async -> Bool {
-        guard let base = authState.baseURL,
-              let token = authState.token else {
+    ///
+    /// - Transient probe failure (network blip) also collapses to
+    ///   `.unauthorized` → session wipe. Accepted trade-off: a 403 is rare,
+    ///   the wipe is recoverable via re-login, and treating a dead probe as
+    ///   "permission denied" would strand users with a revoked session.
+    /// - Validity here is deliberately stricter than `AuthRepositoryImpl.ping()`
+    ///   (pong alone): only a pong WITH an authenticated user proves the token
+    ///   is alive; an anonymous pong (user absent/0) means the token didn't
+    ///   authenticate. The two must not be unified.
+    /// - Reuses the shared `session` (30s timeout) rather than a dedicated
+    ///   short-timeout session to avoid a second URLSession lifecycle; the
+    ///   per-request timeout below bounds the probe.
+    private func probeTokenAlive(baseURL: URL) async -> Bool {
+        guard let token = authState.token else {
             return false
         }
 
-        var components = URLComponents(url: base.appendingPathComponent(APIEndpoint.ping.path), resolvingAgainstBaseURL: false)
-        guard let url = components?.url else {
-            return false
-        }
-
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: baseURL.appendingPathComponent(APIEndpoint.ping.path))
         request.httpMethod = "GET"
+        request.timeoutInterval = 5
         request.setValue("Token \(token)", forHTTPHeaderField: "Authorization")
 
         guard let (data, response) = try? await session.data(for: request),
