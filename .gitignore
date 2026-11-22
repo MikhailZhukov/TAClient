@@ -30,6 +30,9 @@ log_f.txt
 # Claude Code
 .claude/
 
+# Agent harness scratch
+.tmp/
+
 # Internal planning notes
 docs/plans/
 
