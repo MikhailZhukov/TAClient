@@ -521,6 +521,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TAClient/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "TA Client";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Mikhail Zhukov. Licensed under Apache-2.0.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "TA Client streams videos to AirPlay devices on your local network.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -556,6 +559,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TAClient/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "TA Client";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Mikhail Zhukov. Licensed under Apache-2.0.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "TA Client streams videos to AirPlay devices on your local network.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
