@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-final class KeychainService {
+nonisolated final class KeychainService {
     private let serviceName = "ru.mzhukov.TAClient"
     private let accessGroup = "5AS4WKH94K.ru.mzhukov.TAClient"
 
@@ -42,6 +42,13 @@ final class KeychainService {
             return nil
         }
         return String(data: data, encoding: .utf8)
+    }
+
+    /// True when `token` is the credential currently in the keychain. Used by
+    /// the stale-token guards: a late 401/403 carrying a replaced token must
+    /// not revoke the live session.
+    func isCurrentAuthToken(_ token: String) -> Bool {
+        load(for: .authToken) == token
     }
 
     func delete(for key: Key) {

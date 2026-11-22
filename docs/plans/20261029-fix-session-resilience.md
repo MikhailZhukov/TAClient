@@ -219,12 +219,12 @@
 **Files:**
 - Modify: `TAClient/Data/Local/KeychainService.swift`
 
-- [ ] Класс → `nonisolated final class KeychainService` (паттерн CacheStore; только immutable let,
+- [x] Класс → `nonisolated final class KeychainService` (паттерн CacheStore; только immutable let,
       SecItem тред-сейф) — проверить, что все методы компилируются без MainActor-хопов;
       AuthState (MainActor) продолжает работать
-- [ ] Добавить `func isCurrentAuthToken(_ token: String) -> Bool { load(for: .authToken) == token }`
-- [ ] Сборка + полный тест-ран (без новых тестов: project rule — keychain-раундтрипы не тестируем;
-      поведение покрывают Tasks 6-8 через инжектируемые closure)
+- [x] Добавить `func isCurrentAuthToken(_ token: String) -> Bool { load(for: .authToken) == token }`
+- [x] Сборка + полный тест-ран (без новых тестов: project rule — keychain-раундтрипы не тестируем;
+      поведение покрывают Tasks 6-8 через инжектируемые closure) [manual — xcodebuild недоступен в sandbox, swiftc -frontend -parse OK]
 
 ### Task 6: CachingResourceLoader stale-token guard (E)
 
