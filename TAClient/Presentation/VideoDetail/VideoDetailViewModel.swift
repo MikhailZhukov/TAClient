@@ -764,7 +764,12 @@ final class VideoDetailViewModel {
         // state where the new URL/token pair is visible but the bypass flag
         // still reflects the previous asset's mode.
         snapshotPlaybackContext(url: url, token: token, isDirectAsset: false)
-        let loader = CachingResourceLoader(videoId: videoId, originalURL: url, token: token)
+        let loader = CachingResourceLoader(
+            videoId: videoId,
+            originalURL: url,
+            token: token,
+            isTokenCurrent: { KeychainService().isCurrentAuthToken($0) }
+        )
         let avAsset = AVURLAsset(url: cachingURL)
         avAsset.resourceLoader.setDelegate(loader, queue: loader.loaderQueue)
         self.cachingResourceLoader = loader

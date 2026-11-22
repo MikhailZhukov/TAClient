@@ -234,20 +234,24 @@
 - Modify: `TAClientTests/CacheAuthFailureTests.swift` (именно там 401/403-тесты лоадера +
       `NotificationExpectation`-хелпер; в `CachingResourceLoaderTests.swift` их нет)
 
-- [ ] TDD (loader собирается с фейковой closure; наблюдатель `.taAuthUnauthorized` со scope по
+- [x] TDD (loader собирается с фейковой closure; наблюдатель `.taAuthUnauthorized` со scope по
       `object == videoId`):
       - 401 + `isTokenCurrent: { false }` → `handleUnauthorizedIfNeeded` вернул `true` (bail),
         нотификация **не** пришла
       - 401 + `isTokenCurrent: { true }` → нотификация пришла
       - 401 + default (nil) → нотификация пришла (legacy-поведение сохранено)
       - 403 + `isTokenCurrent: { false }` → нет нотификации, вернул `true`
-- [ ] Init-параметр `isTokenCurrent: (@Sendable (String) -> Bool)? = nil`; в
+      (тесты: `cachingResourceLoader_on401_staleToken_doesNotPostNotification`,
+      `..._on401_currentToken_postsNotification`, legacy — `..._on401_postsUnauthorizedNotification`,
+      `..._on403_staleToken_doesNotPostNotification`)
+- [x] Init-параметр `isTokenCurrent: (@Sendable (String) -> Bool)? = nil`; в
       `handleUnauthorizedIfNeeded`: 401/403 → если `isTokenCurrent` задан и `!isTokenCurrent(token)`
       → log (stale, connection replaced) и **без** поста; в любом случае return true
-- [ ] Production-wiring в `makeCachingAsset` (VideoDetailViewModel): передать
+- [x] Production-wiring в `makeCachingAsset` (VideoDetailViewModel): передать
       `isTokenCurrent: { KeychainService().isCurrentAuthToken($0) }` (единственная
       production-точка сборки лоадера)
-- [ ] Запустить тесты — зелёные, до Task 7 не переходить
+- [x] Запустить тесты — зелёные, до Task 7 не переходить (xcodebuild недоступен в sandbox —
+      ручной прогон пользователем; `swiftc -frontend -parse` touched files — чисто)
 
 ### Task 7: VideoCachePreloader stale-token guard (E)
 

@@ -58,6 +58,13 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     /// or accelerated waiter. Defaults to `Task.sleep(for:)`.
     nonisolated let graceSleep: @Sendable (UInt64) async -> Void
 
+    /// Stale-token guard: returns true when the token this loader was built
+    /// with is still the credential in the keychain. When set and returning
+    /// false, a 401/403 from this loader's requests is silently ignored
+    /// (the connection it belonged to has been replaced). nil = legacy
+    /// behavior (always post `.taAuthUnauthorized`).
+    nonisolated let isTokenCurrent: (@Sendable (String) -> Bool)?
+
     nonisolated let activeTasksLock = NSLock()
     nonisolated(unsafe) var activeTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
 
@@ -80,7 +87,8 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
         sessionConfiguration: URLSessionConfiguration? = nil,
         store: CacheStore = VideoCachePreloader.shared.store,
         isPreloadingCheck: (@Sendable (String) async -> Bool)? = nil,
-        graceSleep: (@Sendable (UInt64) async -> Void)? = nil
+        graceSleep: (@Sendable (UInt64) async -> Void)? = nil,
+        isTokenCurrent: (@Sendable (String) -> Bool)? = nil
     ) {
         self.videoId = videoId
         self.originalURL = originalURL
@@ -92,6 +100,7 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
         self.graceSleep = graceSleep ?? { ms in
             try? await Task.sleep(for: .milliseconds(ms))
         }
+        self.isTokenCurrent = isTokenCurrent
 
         let config: URLSessionConfiguration
         if let sessionConfiguration {
@@ -612,6 +621,13 @@ final class CachingResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     nonisolated func handleUnauthorizedIfNeeded(response: URLResponse?) -> Bool {
         guard let http = response as? HTTPURLResponse else { return false }
         if http.statusCode == 401 || http.statusCode == 403 {
+            if let isTokenCurrent, !isTokenCurrent(token) {
+                // Stale token: the connection this loader belongs to has been
+                // replaced (server switch). Its 401/403 must not revoke the
+                // live session — bail without posting.
+                logger.error("Stale token for \(self.videoId): \(http.statusCode) — connection replaced, ignoring")
+                return true
+            }
             logger.error("Unauthorized for \(self.videoId): \(http.statusCode)")
             // Post with `videoId` as `object` so tests can scope observers
             // to a specific loader instance and avoid cross-test bleed.
