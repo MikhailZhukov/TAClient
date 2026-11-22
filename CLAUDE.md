@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TAClient — iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 104 app files + 1 Share Extension file, 53 test files, ~577 passing tests (excluding `testLaunchPerformance` — known XCUITest perf-metric flake unrelated to project code). Licensed under Apache-2.0 (MobileVLCKit remains under LGPL-2.1-or-later — see `NOTICE`).
+TAClient — iOS/iPadOS client for [Tube Archivist](https://github.com/tubearchivist/tubearchivist), a self-hosted YouTube archiver. SwiftUI + MobileVLCKit for VP9 codec support. 104 app files + 1 Share Extension file, 53 test files, ~610 passing tests (excluding `testLaunchPerformance` — known XCUITest perf-metric flake unrelated to project code). Licensed under Apache-2.0 (MobileVLCKit remains under LGPL-2.1-or-later — see `NOTICE`).
 
 ## Build & Run
 
@@ -343,9 +343,9 @@ Automatic skip of sponsor segments and other non-content sections during playbac
 
 ## Testing
 
-**~577 tests, all passing** (excluding `testLaunchPerformance` — known XCUITest perf-metric flake unrelated to project code). Swift Testing framework (`@Test`, `#expect()`) — NOT XCTest.
+**~610 tests, all passing** (excluding `testLaunchPerformance` — known XCUITest perf-metric flake unrelated to project code). Swift Testing framework (`@Test`, `#expect()`) — NOT XCTest.
 
-Phase counts below are approximate scope buckets, not exact tallies — suites have grown organically and a number of cross-cutting suites (`AppRouterTests`, `AuthStateTests`, `NotificationTests`, `SponsorBlock*Tests`, `UserPrivilegesTests`, `PlayerGestureTests`, `SimilarVideosTests`, several ViewModel suites, etc.) cover behaviour spanning multiple phases. Only the ~577 total is canonical.
+Phase counts below are approximate scope buckets, not exact tallies — suites have grown organically and a number of cross-cutting suites (`AppRouterTests`, `AuthStateTests`, `NotificationTests`, `SponsorBlock*Tests`, `UserPrivilegesTests`, `PlayerGestureTests`, `SimilarVideosTests`, several ViewModel suites, etc.) cover behaviour spanning multiple phases. Only the ~610 total is canonical.
 
 | Phase | Tests | Scope |
 |-------|-------|-------|

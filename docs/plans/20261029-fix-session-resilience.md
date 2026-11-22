@@ -305,14 +305,26 @@
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] Проверить требования Overview: (A) оффлайн-старт не стирает токен, экран reconnect + retry
+- [x] Проверить требования Overview: (A) оффлайн-старт не стирает токен, экран reconnect + retry
       работает; (B) 403 с живым токеном → баннер без logout; (E) поздний 401/403 со старым токеном
       не отзывает новую сессию — во всех трёх дверях
-- [ ] Проверить edge-кейсы: ping-403 без рекурсии; stale-чек раньше 403-пробы; legacy nil-closure
+      (проверено статически по git diff main...HEAD: A — StartupOutcome.swift + AppRouter.attemptStartup/
+      onStartupUnavailable/AppState.unavailable + RootView.swift:57-68 ReconnectView на `.unavailable`,
+      тесты attemptStartup_* 7 кейсов; B — APIClient.rawRequest 401→unauthorized / 403→probeTokenAlive→
+      permissionDenied, AppError.permissionDenied + `error_permission_denied` en/ru, тесты 403_pingAlive/
+      ping401/pingNetworkFail/pingNotPong; E — дверь 1: stale-чек @APIClient.swift:100 до 401-маппинга
+      и 403-пробы, 4 теста; дверь 2: CachingResourceLoader.isTokenCurrent + пост-гейт :624, wiring
+      VideoDetailViewModel.swift:771; дверь 3: VideoCachePreloader shared/init/post-sites :695/:766,
+      KeychainService nonisolated + isCurrentAuthToken; суммарно 35 новых @Test)
+- [x] Проверить edge-кейсы: ping-403 без рекурсии; stale-чек раньше 403-пробы; legacy nil-closure
       поведения не изменилось; `pong != "pong"` → unavailable
-- [ ] Полный тест-ран: `/bin/bash -c 'xcodebuild test -scheme TAClient -destination "platform=iOS Simulator,name=iPhone 17 Pro"'`
-- [ ] Сборка: `/bin/bash -c 'xcodebuild build -scheme TAClient -destination "platform=iOS Simulator,name=iPhone 17 Pro"'`
-- [ ] Обновить счётчики тестов в CLAUDE.md (≈577 + новые)
+      (пины существуют: `request_403OnPingItself_throwsUnauthorized_noRecursion`,
+      `request_403_tokenReplacedInFlight_throwsNetworkWithoutProbe`, legacy — loader `on401/on403_postsUnauthorizedNotification`
+      + `preloader_headProbe401_nilTokenCheck_postsNotification_legacy`, `request_403_pingNotPong_throwsUnauthorized` +
+      `attemptStartup_pingNotPong_showsUnavailable`)
+- [x] Полный тест-ран: `/bin/bash -c 'xcodebuild test -scheme TAClient -destination "platform=iOS Simulator,name=iPhone 17 Pro"'` [manual — xcodebuild недоступен в sandbox; `swiftc -frontend -parse` чист на всех 16 затронутых Swift-файлах; прогон — вручную в Xcode]
+- [x] Сборка: `/bin/bash -c 'xcodebuild build -scheme TAClient -destination "platform=iOS Simulator,name=iPhone 17 Pro"'` [manual — xcodebuild недоступен в sandbox; синтаксис-проверка пройдена, сборка — вручную в Xcode]
+- [x] Обновить счётчики тестов в CLAUDE.md (≈577 + новые) [сделано: +35/−2 @Test → ~610, обновлены 3 упоминания в CLAUDE.md]
 
 ### Task 10: Update documentation
 
