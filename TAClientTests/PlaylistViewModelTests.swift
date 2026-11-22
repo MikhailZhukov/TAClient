@@ -11,7 +11,7 @@ struct PlaylistListViewModelTests {
         let keychain = KeychainService()
         keychain.clearAll()
         let authState = AuthState(keychainService: keychain)
-        let router = AppRouter(authState: authState)
+        let router = AppRouter(authState: authState, authRepository: MockAuthRepository())
         let vm = PlaylistListViewModel(playlistRepository: playlistRepo, router: router)
         return (vm, router)
     }
@@ -187,7 +187,7 @@ struct PlaylistDetailViewModelTests {
         let keychain = KeychainService()
         keychain.clearAll()
         let authState = AuthState(keychainService: keychain)
-        let router = AppRouter(authState: authState)
+        let router = AppRouter(authState: authState, authRepository: MockAuthRepository())
         let vm = PlaylistDetailViewModel(
             playlistId: playlistId,
             playlistRepository: playlistRepo,

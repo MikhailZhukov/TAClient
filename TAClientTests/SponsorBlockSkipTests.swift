@@ -12,7 +12,7 @@ struct SponsorBlockSkipTests {
         let keychain = KeychainService()
         keychain.clearAll()
         let authState = AuthState(keychainService: keychain)
-        let router = AppRouter(authState: authState)
+        let router = AppRouter(authState: authState, authRepository: MockAuthRepository())
         let settings = sponsorBlockSettings ?? {
             let defaults = UserDefaults(suiteName: "test-sb-\(UUID().uuidString)")!
             return SponsorBlockSettings(defaults: defaults)

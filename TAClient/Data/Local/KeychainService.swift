@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-final class KeychainService {
+nonisolated final class KeychainService {
     private let serviceName = "ru.mzhukov.TAClient"
     private let accessGroup = "5AS4WKH94K.ru.mzhukov.TAClient"
 
@@ -42,6 +42,16 @@ final class KeychainService {
             return nil
         }
         return String(data: data, encoding: .utf8)
+    }
+
+    /// True when `token` is the credential currently in the keychain. Used by
+    /// the stale-token guards: a late 401/403 carrying a replaced token must
+    /// not revoke the live session. A keychain READ failure returns `true` —
+    /// staleness can never be proven from a failed read, so a legit 401/403
+    /// from the current token must keep its legacy "revoke" behavior.
+    func isCurrentAuthToken(_ token: String) -> Bool {
+        guard let current = load(for: .authToken) else { return true }
+        return current == token
     }
 
     func delete(for key: Key) {

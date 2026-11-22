@@ -945,6 +945,7 @@ extension DataLayerSuite {
 
         // Prefix returns 401; main 206 normally. Both must run, prefix
         // posts notification, main completes.
+        //
         Self.installParallelMock(
             totalSize: totalSize,
             prefixData: Data(),
@@ -957,7 +958,11 @@ extension DataLayerSuite {
             MockResponse.tearDown()
         }
 
-        await VideoCachePreloader.shared.clear()
+        // Constructed with an explicit `isTokenCurrent` returning true: the
+        // process-wide `.shared` preloader consults the real keychain, which
+        // is shared across parallel test suites — seeding it would still
+        // leave a cross-suite race on the guard's read.
+        let preloader = VideoCachePreloader(isTokenCurrent: { _ in true })
 
         let videoId = "vid-401-prefix"
         let expectation = NotificationExpectation(
@@ -965,7 +970,7 @@ extension DataLayerSuite {
             senderId: videoId
         )
 
-        await VideoCachePreloader.shared.startPreloadWithRetry(
+        await preloader.startPreloadWithRetry(
             videoId: videoId,
             url: URL(string: "https://ta.example.com/media/\(videoId).mp4")!,
             token: "test-token",
@@ -978,14 +983,12 @@ extension DataLayerSuite {
         #expect(fired, "401 from prefix GET must post .taAuthUnauthorized")
 
         // Main should still have completed independently.
-        let store = VideoCachePreloader.shared.store
+        let store = preloader.store
         let mainReady = await Self.pollUntil(timeoutSeconds: 5) {
             let status = store.regionStatus(videoId: videoId, region: .main)
             return (status?.endOffset ?? 0) == Int64(totalSize)
         }
         #expect(mainReady, "main should complete despite prefix 401 — per-task isolation")
-
-        await VideoCachePreloader.shared.clear()
     }
 
     @Test func memoryWarning_preservesPrefix_trimsMainOnly() async {

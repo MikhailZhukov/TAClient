@@ -79,6 +79,7 @@ Tube Archivist is excellent at archiving your YouTube library on a server you co
 - **VP8 / VP9** support via VLC fallback (auto-selected per video codec)
 - In-memory video cache with sliding window for smooth seeking on slow servers
 - Watch-progress sync — every 10 seconds, plus on pause and on completion
+- Offline-tolerant startup — unreachable server keeps your credentials and offers Retry / Change Server instead of logging you out
 - **SponsorBlock** — automatic skip of sponsor segments with per-category toggles and undo
 - Background audio + lock-screen controls (play / pause / skip / seek / artwork)
 - Picture-in-Picture playback, including auto-PiP from inline when the app goes to background

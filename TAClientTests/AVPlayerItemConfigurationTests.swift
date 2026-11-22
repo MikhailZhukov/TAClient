@@ -26,7 +26,7 @@ struct AVPlayerItemConfigurationTests {
         let keychain = KeychainService()
         keychain.clearAll()
         let authState = AuthState(keychainService: keychain)
-        let router = AppRouter(authState: authState)
+        let router = AppRouter(authState: authState, authRepository: MockAuthRepository())
         return VideoDetailViewModel(
             videoId: "test-video-id",
             videoRepository: MockVideoRepository(),

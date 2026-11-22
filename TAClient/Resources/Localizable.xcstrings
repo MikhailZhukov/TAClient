@@ -615,6 +615,22 @@
         }
       }
     },
+    "error_permission_denied" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not enough permissions"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Недостаточно разрешений"
+          }
+        }
+      }
+    },
     "error_unauthorized" : {
       "localizations" : {
         "en" : {
@@ -1225,6 +1241,86 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Не добавлено"
+          }
+        }
+      }
+    },
+    "reconnect_change_server" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Change Server"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сменить сервер"
+          }
+        }
+      }
+    },
+    "reconnect_change_server_confirm_message" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Your saved credentials will be cleared and you'll return to the login screen."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Текущие учётные данные будут удалены, и вы вернётесь на экран входа."
+          }
+        }
+      }
+    },
+    "reconnect_change_server_confirm_title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Change server?"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сменить сервер?"
+          }
+        }
+      }
+    },
+    "reconnect_retry" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Retry"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Повторить"
+          }
+        }
+      }
+    },
+    "reconnect_title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Server Unreachable"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сервер недоступен"
           }
         }
       }

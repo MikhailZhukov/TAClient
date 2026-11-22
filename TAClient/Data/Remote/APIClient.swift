@@ -66,8 +66,13 @@ final class APIClient {
         request.httpMethod = endpoint.method.rawValue
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        if let token = authState.token {
-            request.setValue("Token \(token)", forHTTPHeaderField: "Authorization")
+        // Snapshot the token that identifies THIS connection. A 401/403 that
+        // arrives after the credentials were replaced (in-flight server
+        // switch) belongs to a dead session and must not revoke the live one.
+        let sentToken = authState.token
+
+        if let sentToken {
+            request.setValue("Token \(sentToken)", forHTTPHeaderField: "Authorization")
         }
 
         if let body {
@@ -89,11 +94,75 @@ final class APIClient {
         case 200...299:
             return data
         case 401, 403:
+            // Stale-token guard: a late 401/403 from a request carrying a
+            // since-replaced token must not revoke the live session — die
+            // neutrally instead (banner, no logout), before any probe.
+            if let sentToken, sentToken != authState.token {
+                throw AppError.network(underlying: nil)
+            }
+            // A 403 with a still-valid token means "authenticated but not
+            // allowed" (e.g. non-admin hitting an admin endpoint) — surface
+            // it as a plain error banner instead of wiping the session.
+            // Verify with a direct ping probe; the ping endpoint itself is
+            // exempt to avoid recursion.
+            if httpResponse.statusCode == 401 {
+                throw AppError.unauthorized
+            }
+            if case .ping = endpoint {
+                throw AppError.unauthorized
+            }
+            let probeAlive = await probeTokenAlive(baseURL: base)
+            if probeAlive {
+                throw AppError.permissionDenied
+            }
+            // The probe can race a credential swap: if the token changed
+            // while the probe was in flight, its "dead" verdict applies to
+            // the OLD session — wiping now would revoke the fresh one.
+            if let sentToken, sentToken != authState.token {
+                throw AppError.network(underlying: nil)
+            }
             throw AppError.unauthorized
         default:
             let message = String(data: data, encoding: .utf8)
             throw AppError.serverError(statusCode: httpResponse.statusCode, message: message)
         }
+    }
+
+    /// Direct `GET /api/ping/` with the current token — deliberately not
+    /// routed through `request<T>` (a 403 there would recurse back into the
+    /// probe). Returns true only when the server confirms the token is alive
+    /// (pong + authenticated user); every failure mode means the session is
+    /// dead and maps to `AppError.unauthorized`.
+    ///
+    /// - Transient probe failure (network blip) also collapses to
+    ///   `.unauthorized` → session wipe. Accepted trade-off: a 403 is rare,
+    ///   the wipe is recoverable via re-login, and treating a dead probe as
+    ///   "permission denied" would strand users with a revoked session.
+    /// - Validity here is deliberately stricter than `AuthRepositoryImpl.ping()`
+    ///   (pong alone): only a pong WITH an authenticated user proves the token
+    ///   is alive; an anonymous pong (user absent/0) means the token didn't
+    ///   authenticate. The two must not be unified.
+    /// - Reuses the shared `session` (30s timeout) rather than a dedicated
+    ///   short-timeout session to avoid a second URLSession lifecycle; the
+    ///   per-request timeout below bounds the probe.
+    private func probeTokenAlive(baseURL: URL) async -> Bool {
+        guard let token = authState.token else {
+            return false
+        }
+
+        var request = URLRequest(url: baseURL.appendingPathComponent(APIEndpoint.ping.path))
+        request.httpMethod = "GET"
+        request.timeoutInterval = 5
+        request.setValue("Token \(token)", forHTTPHeaderField: "Authorization")
+
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse,
+              http.statusCode == 200,
+              let dto = try? Self.decoder.decode(PingDTO.self, from: data)
+        else {
+            return false
+        }
+        return dto.response == "pong" && (dto.user ?? 0) > 0
     }
 
     // MARK: - Login (2-step with cookies)

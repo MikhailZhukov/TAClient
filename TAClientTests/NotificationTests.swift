@@ -11,7 +11,7 @@ struct NotificationBadgeTests {
         let keychain = KeychainService()
         keychain.clearAll()
         let authState = AuthState(keychainService: keychain)
-        let router = AppRouter(authState: authState)
+        let router = AppRouter(authState: authState, authRepository: MockAuthRepository())
         let vm = VideoListViewModel(
             videoRepository: videoRepo,
             authRepository: MockAuthRepository(),
@@ -89,7 +89,7 @@ struct RescanViewModelTests {
         let keychain = KeychainService()
         keychain.clearAll()
         let authState = AuthState(keychainService: keychain)
-        let router = AppRouter(authState: authState)
+        let router = AppRouter(authState: authState, authRepository: MockAuthRepository())
         let vm = DownloadQueueViewModel(downloadRepository: downloadRepo, router: router)
         return (vm, router)
     }

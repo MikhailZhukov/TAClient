@@ -38,7 +38,7 @@ final class DependencyContainer {
         playlistRepository = PlaylistRepositoryImpl(apiClient: apiClient, authState: authState)
 
         sponsorBlockSettings = SponsorBlockSettings()
-        router = AppRouter(authState: authState)
+        router = AppRouter(authState: authState, authRepository: authRepository)
     }
 
     // MARK: - ViewModel Factories

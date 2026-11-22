@@ -145,6 +145,11 @@ final class VideoDetailViewModel {
     @ObservationIgnored
     nonisolated(unsafe) private var lastRestartAt: CFAbsoluteTime = 0
 
+    /// One instance for the guard closure — same pattern as
+    /// `VideoCachePreloader.keychain`; KeychainService is `nonisolated` with
+    /// immutable storage, safe to share.
+    nonisolated private static let keychain = KeychainService()
+
     /// Debounce window for `reseedMain` dispatch from the 1Hz trigger.
     /// Suppresses re-fire when the user rapid-scrubs across multiple
     /// destinations within 2s.
@@ -764,7 +769,15 @@ final class VideoDetailViewModel {
         // state where the new URL/token pair is visible but the bypass flag
         // still reflects the previous asset's mode.
         snapshotPlaybackContext(url: url, token: token, isDirectAsset: false)
-        let loader = CachingResourceLoader(videoId: videoId, originalURL: url, token: token)
+        // Shared instance for the guard closure — same pattern as
+        // `VideoCachePreloader.keychain`; KeychainService is `nonisolated`
+        // with immutable storage, safe to share.
+        let loader = CachingResourceLoader(
+            videoId: videoId,
+            originalURL: url,
+            token: token,
+            isTokenCurrent: { Self.keychain.isCurrentAuthToken($0) }
+        )
         let avAsset = AVURLAsset(url: cachingURL)
         avAsset.resourceLoader.setDelegate(loader, queue: loader.loaderQueue)
         self.cachingResourceLoader = loader

@@ -19,32 +19,46 @@ extension DataLayerSuite {
 
     @Test func search_success_returnsVideosAndChannels() async throws {
         let (repo, authState) = makeRepo()
-        MockResponse.setUp(json: [
-            "results": [
-                "video_results": [
-                    [
-                        "youtube_id": "sv1",
-                        "title": "Search Result Video",
-                        "published": "2024-03-01",
-                        "channel": ["channel_id": "ch1", "channel_name": "Ch"],
-                        "vid_thumb_url": "/cache/search-thumb.jpg",
-                        "media_url": "/cache/search-video.mp4",
-                        "player": ["watched": false, "duration": 120, "duration_str": "2:00"],
-                        "stats": ["view_count": 500],
-                        "vid_type": "videos"
-                    ]
-                ],
-                "channel_results": [
-                    [
-                        "channel_id": "ch-search",
-                        "channel_name": "Found Channel",
-                        "channel_thumb_url": "/cache/ch-search.jpg",
-                        "channel_subs": 1000,
-                        "channel_subscribed": true
+        // Capture the request URL in our own handler rather than reading
+        // `MockURLProtocol.lastRequest`: lastRequest is process-wide static
+        // state written by ANY suite's mock request (parallel suites like
+        // VideoCachePreloaderTests fire background preload/retry requests),
+        // so a stray write can race this assertion. `requestHandler` itself
+        // is equally global — a stray request gets served by THIS handler
+        // too — so only record the URL we recognize (the search GET) and
+        // ignore everything else.
+        nonisolated(unsafe) var capturedURL: URL?
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path == "/api/search" {
+                capturedURL = request.url
+            }
+            return (MockResponse.httpResponse(), MockResponse.json([
+                "results": [
+                    "video_results": [
+                        [
+                            "youtube_id": "sv1",
+                            "title": "Search Result Video",
+                            "published": "2024-03-01",
+                            "channel": ["channel_id": "ch1", "channel_name": "Ch"],
+                            "vid_thumb_url": "/cache/search-thumb.jpg",
+                            "media_url": "/cache/search-video.mp4",
+                            "player": ["watched": false, "duration": 120, "duration_str": "2:00"],
+                            "stats": ["view_count": 500],
+                            "vid_type": "videos"
+                        ]
+                    ],
+                    "channel_results": [
+                        [
+                            "channel_id": "ch-search",
+                            "channel_name": "Found Channel",
+                            "channel_thumb_url": "/cache/ch-search.jpg",
+                            "channel_subs": 1000,
+                            "channel_subscribed": true
+                        ]
                     ]
                 ]
-            ]
-        ] as [String: Any])
+            ] as [String: Any]))
+        }
 
         let result = try await repo.search(query: "test query", page: 1)
         #expect(result.videos.count == 1)
@@ -54,8 +68,12 @@ extension DataLayerSuite {
         #expect(result.channels[0].channelId == "ch-search")
 
         // Verify query param
-        let url = MockURLProtocol.lastRequest?.url
-        let components = URLComponents(url: url!, resolvingAgainstBaseURL: false)
+        guard let capturedURL else {
+            Issue.record("Search request was not observed by the mock handler")
+            authState.handleUnauthorized()
+            return
+        }
+        let components = URLComponents(url: capturedURL, resolvingAgainstBaseURL: false)
         let queryItem = components?.queryItems?.first { $0.name == "query" }
         #expect(queryItem?.value == "test query")
         authState.handleUnauthorized()

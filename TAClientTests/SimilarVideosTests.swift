@@ -14,7 +14,7 @@ struct SimilarVideosViewModelTests {
         let keychain = KeychainService()
         keychain.clearAll()
         let authState = AuthState(keychainService: keychain)
-        let router = AppRouter(authState: authState)
+        let router = AppRouter(authState: authState, authRepository: MockAuthRepository())
         let vm = VideoDetailViewModel(videoId: videoId, videoRepository: videoRepo, authState: authState, router: router)
         return (vm, router)
     }
