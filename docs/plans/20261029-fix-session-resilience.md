@@ -191,7 +191,7 @@
 - Modify: `TAClient/Data/Remote/APIClient.swift`
 - Modify: `TAClientTests/APIClientTests.swift` (Phase 3, MockURLProtocol)
 
-- [ ] TDD (одна `requestHandler`, ветвление по `request.url?.path` — `/api/ping/` → probe-ответ,
+- [x] TDD (одна `requestHandler`, ветвление по `request.url?.path` — `/api/ping/` → probe-ответ,
       остальное → исходный 403/401):
       - `..._403_pingAlive_throwsPermissionDenied`: 403 на `/api/download/` + ping 200
         `{"response":"pong","user":5}` → `AppError.permissionDenied`; в логе запросов **был**
@@ -208,11 +208,11 @@
         (APIClientTests.swift:33–57, оба на `endpoint: .ping`) — остаются зелёными через no-recursion
         guard и pin-ят его; «403 на non-ping эндпоинте с мёртвым ping» до этого не покрывался —
         новые тесты закрывают разрыв
-- [ ] Реализовать: в `rawRequest` — `case 401:` → `.unauthorized`; `case 403:` →
+- [x] Реализовать: в `rawRequest` — `case 401:` → `.unauthorized`; `case 403:` →
       `endpoint == .ping` ? `.unauthorized` : (`await probeTokenAlive()` ? `.permissionDenied`
       : `.unauthorized`); `probeTokenAlive()` — прямой URLRequest на ping-URL (не через
       `request<T>`), тот же session, Token-заголовок, 200 + `PingDTO` + pong + `user > 0`
-- [ ] Запустить тесты — зелёные, до Task 5 не переходить
+- [x] Запустить тесты — зелёные, до Task 5 не переходить
 
 ### Task 5: KeychainService nonisolated + isCurrentAuthToken (E)
 
