@@ -248,9 +248,9 @@ extension DataLayerSuite {
                     mutationDone.signal()
                 }
                 let signaled = mutationDone.wait(timeout: .now() + 5)
-                // A false wait result means MainActor never ran the swap and
-                // the test would silently exercise the non-stale path.
-                if !signaled {
+                // A timeout means MainActor never ran the swap and the test
+                // would silently exercise the non-stale path.
+                if signaled == .timedOut {
                     Issue.record("Credential swap semaphore timed out")
                 }
             }
@@ -285,7 +285,7 @@ extension DataLayerSuite {
                 mutationDone.signal()
             }
             let signaled = mutationDone.wait(timeout: .now() + 5)
-            if !signaled {
+            if signaled == .timedOut {
                 Issue.record("Credential swap semaphore timed out")
             }
             return (MockResponse.httpResponse(statusCode: 403), MockResponse.json(["detail": "Forbidden"]))
@@ -323,7 +323,7 @@ extension DataLayerSuite {
                     mutationDone.signal()
                 }
                 let signaled = mutationDone.wait(timeout: .now() + 5)
-                if !signaled {
+                if signaled == .timedOut {
                     Issue.record("Credential swap semaphore timed out")
                 }
                 // Non-pong response → probe reports the token dead.
