@@ -15,6 +15,12 @@ struct AppErrorTests {
         #expect(!error.errorDescription!.isEmpty)
     }
 
+    @Test func permissionDenied_returnsLocalizedString() {
+        let error = AppError.permissionDenied
+        #expect(error.errorDescription != nil)
+        #expect(!error.errorDescription!.isEmpty)
+    }
+
     @Test func serverError_withMessage_returnsMessage() {
         let error = AppError.serverError(statusCode: 500, message: "oops")
         #expect(error.errorDescription == "oops")

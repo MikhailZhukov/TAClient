@@ -174,12 +174,16 @@
 - Modify: `TAClient/Resources/Localizable.xcstrings`
 - Modify: `TAClientTests/AppErrorTests.swift` (существующий per-case `errorDescription` suite)
 
-- [ ] Grep по `TAClient/` и `TAClientTests/` exhaustive-switch по `AppError` (`switch ... as? AppError`,
+- [x] Grep по `TAClient/` и `TAClientTests/` exhaustive-switch по `AppError` (`switch ... as? AppError`,
       `case .unauthorized:` и т.п.) — список мест, которые сломает новый case; зафиксировать в плане (➕)
-- [ ] TDD: тест `errorDescription` для `.permissionDenied` → `"error_permission_denied"`
-- [ ] Добавить `case permissionDenied` + localized description; ключ `error_permission_denied`
+      — exhaustive-switch есть только в `AppError.errorDescription` (обновлён); остальные места —
+      non-exhaustive `if case` (AppRouter.handleError → generic branch = banner без logout,
+      StartupOutcome, тесты), ломать нечему.
+- [x] TDD: тест `errorDescription` для `.permissionDenied` → `"error_permission_denied"`
+- [x] Добавить `case permissionDenied` + localized description; ключ `error_permission_denied`
       (en: "Not enough permissions", ru: «Недостаточно разрешений»)
-- [ ] Обновить найденные в grep места (если есть); запустить тесты — зелёные
+- [x] Обновить найденные в grep места (если есть); запустить тесты — зелёные
+      (xcodebuild недоступно в sandbox — swiftc -frontend -parse зелёный; полный тест-ран ручной в Xcode)
 
 ### Task 4: APIClient 403 → ping-проба (B)
 
