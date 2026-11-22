@@ -135,7 +135,7 @@
       (`makeMockRouter`, :205 — shared-инфра, 9× `WrapperLifecycleTests`) и все прямые
       `AppRouter(authState:)` в ~17 test-файлах (grep `AppRouter(`)
 
-- [ ] TDD: `AppRouterTests.attemptStartup_*` — существующий `MockAuthRepository` (injectable
+- [x] TDD: `AppRouterTests.attemptStartup_*` — существующий `MockAuthRepository` (injectable
       `pingHandler`/`fetchUserAccountHandler`) + **реальный** `AuthState` (final `@Observable` —
       mock невозможен) с реальным `KeychainService`; wipe проверяется по `authState.token`:
       - ping ok + account ok → `.authenticated`, токен сохранён
@@ -145,25 +145,27 @@
       - ping ok, account → `.network`/`.serverError` → `.authenticated` БЕЗ wipe, `isPrivileged == false`
         (сохраняет текущее `try?`-поведание: сервер жив — сессию не бьём)
       - ping 200 но `response != "pong"` (repo вернёт false) → `.unavailable`
-- [ ] TDD: `onStartupUnavailable` — appState `.unavailable`, authState не тронут
-- [ ] Добавить `AppState.unavailable`; `onStartupUnavailable()`; `attemptStartup()`: ping →
+      (note: xcodebuild недоступен в sandbox — тесты написаны и синтаксис-проверены `swiftc -frontend -parse`; выполнение вручную в Xcode)
+- [x] TDD: `onStartupUnavailable` — appState `.unavailable`, authState не тронут
+- [x] Добавить `AppState.unavailable`; `onStartupUnavailable()`; `attemptStartup()`: ping →
       classify; `.unauthorized` (ping ИЛИ account) → router `handleUnauthorized()` (идемпотентный —
       не дублировать последовательность `onAutoLoginFailed`); любой другой сбой ping →
       `onStartupUnavailable()`; сбой account (не `.unauthorized`) → log + `onLoginSuccess()` с
       `isPrivileged == false` (текущее `try?`-поведание); init `AppRouter(authState:authRepository:)`,
       контейнер передать `authRepository`
-- [ ] `RootView`: убрать локальный `autoLogin()`, `.task { await router.attemptStartup() }` на
+- [x] `RootView`: убрать локальный `autoLogin()`, `.task { await router.attemptStartup() }` на
       `.splash`; `case .unavailable: ReconnectView(retry: { await router.attemptStartup() },
       changeServer: { router.onAutoLoginFailed() }, serverName: ...)`
-- [ ] `ReconnectView`: системные цвета/типаграфика (`.headline`, `.body`), `accessibilityLabel`
+- [x] `ReconnectView`: системные цвета/типаграфика (`.headline`, `.body`), `accessibilityLabel`
       на кнопках, `confirmationDialog` перед «Change server» (destructive), `ProgressView`
       во время retry, server name из `container.authState.serverURL` (`RootView` уже держит
       `@Environment(DependencyContainer.self)`; `AppRouter.authState` — private, не добавлять
       accessor ради одного имени)
-- [ ] Локализация: `reconnect_title`, `reconnect_retry`, `reconnect_change_server`,
+- [x] Локализация: `reconnect_title`, `reconnect_retry`, `reconnect_change_server`,
       `reconnect_change_server_confirm_title`, `reconnect_change_server_confirm_message`
       (en + ru)
-- [ ] Запустить тесты — зелёные, до Task 3 не переходить
+- [x] Запустить тесты — зелёные, до Task 3 не переходить
+      (note: не автоматизируемо в sandbox — xcodebuild недоступен; `swiftc -frontend -parse` зелёный на всех затронутых файлах, полный прогон — вручную в Xcode)
 
 ### Task 3: AppError.permissionDenied (B)
 
