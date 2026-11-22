@@ -48,6 +48,239 @@ extension DataLayerSuite {
         }
     }
 
+    // MARK: - 403 ping probe (session resilience B)
+
+    @Test func request_403_pingAlive_throwsPermissionDenied() async {
+        let (client, authState) = MockResponse.makeAPIClient()
+        nonisolated(unsafe) var pingCount = 0
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path == "/api/ping" {
+                pingCount += 1
+                return (MockResponse.httpResponse(statusCode: 200), MockResponse.json(["response": "pong", "user": 5]))
+            }
+            return (MockResponse.httpResponse(statusCode: 403), MockResponse.json(["detail": "Forbidden"]))
+        }
+        defer { MockResponse.tearDown() }
+
+        do {
+            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
+            Issue.record("Expected AppError.permissionDenied")
+        } catch let error as AppError {
+            if case .permissionDenied = error {} else {
+                Issue.record("Expected .permissionDenied, got \(error)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+        #expect(pingCount == 1)
+        #expect(authState.token == "test-token")
+    }
+
+    @Test func request_403_ping401_throwsUnauthorized() async {
+        let (client, _) = MockResponse.makeAPIClient()
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path == "/api/ping" {
+                return (MockResponse.httpResponse(statusCode: 401), MockResponse.json(["detail": "Invalid token"]))
+            }
+            return (MockResponse.httpResponse(statusCode: 403), MockResponse.json(["detail": "Forbidden"]))
+        }
+        defer { MockResponse.tearDown() }
+
+        do {
+            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
+            Issue.record("Expected AppError.unauthorized")
+        } catch let error as AppError {
+            if case .unauthorized = error {} else {
+                Issue.record("Expected .unauthorized, got \(error)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func request_403_pingNetworkFail_throwsUnauthorized() async {
+        let (client, _) = MockResponse.makeAPIClient()
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path == "/api/ping" {
+                throw URLError(.cannotConnectToHost)
+            }
+            return (MockResponse.httpResponse(statusCode: 403), MockResponse.json(["detail": "Forbidden"]))
+        }
+        defer { MockResponse.tearDown() }
+
+        do {
+            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
+            Issue.record("Expected AppError.unauthorized")
+        } catch let error as AppError {
+            if case .unauthorized = error {} else {
+                Issue.record("Expected .unauthorized, got \(error)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func request_403_pingNotPong_throwsUnauthorized() async {
+        let (client, _) = MockResponse.makeAPIClient()
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path == "/api/ping" {
+                return (MockResponse.httpResponse(statusCode: 200), MockResponse.json(["response": "nope"]))
+            }
+            return (MockResponse.httpResponse(statusCode: 403), MockResponse.json(["detail": "Forbidden"]))
+        }
+        defer { MockResponse.tearDown() }
+
+        do {
+            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
+            Issue.record("Expected AppError.unauthorized")
+        } catch let error as AppError {
+            if case .unauthorized = error {} else {
+                Issue.record("Expected .unauthorized, got \(error)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func request_401_doesNotPing() async {
+        let (client, _) = MockResponse.makeAPIClient()
+        nonisolated(unsafe) var pingCount = 0
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path == "/api/ping" {
+                pingCount += 1
+            }
+            return (MockResponse.httpResponse(statusCode: 401), MockResponse.json(["detail": "Invalid token"]))
+        }
+        defer { MockResponse.tearDown() }
+
+        await #expect(throws: AppError.self) {
+            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
+        }
+        #expect(pingCount == 0)
+    }
+
+    @Test func request_403OnPingItself_throwsUnauthorized_noRecursion() async {
+        let (client, _) = MockResponse.makeAPIClient()
+        nonisolated(unsafe) var totalCount = 0
+        MockURLProtocol.requestHandler = { _ in
+            totalCount += 1
+            return (MockResponse.httpResponse(statusCode: 403), MockResponse.json(["detail": "Forbidden"]))
+        }
+        defer { MockResponse.tearDown() }
+
+        do {
+            let _: PingDTO = try await client.request(endpoint: .ping)
+            Issue.record("Expected AppError.unauthorized")
+        } catch let error as AppError {
+            if case .unauthorized = error {} else {
+                Issue.record("Expected .unauthorized, got \(error)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+        #expect(totalCount == 1)
+    }
+
+    // MARK: - Stale-token door (session resilience E)
+
+    private func expectStaleAuthThrowsNetwork(client: APIClient) async {
+        do {
+            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
+            Issue.record("Expected AppError.network")
+        } catch let error as AppError {
+            if case .network = error {} else {
+                Issue.record("Expected .network, got \(error)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func request_401_tokenReplacedInFlight_throwsNetwork() async {
+        let (client, authState) = MockResponse.makeAPIClient()
+        let mutationDone = DispatchSemaphore(value: 0)
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path == "/api/download" {
+                // Simulate an in-flight server switch. Block the response
+                // until the credential swap lands on MainActor — the test is
+                // suspended awaiting, so MainActor is free and the swap is
+                // guaranteed to precede the client's post-await token read.
+                Task { @MainActor in
+                    authState.setCredentials(token: "token-B", serverURL: "https://ta.example.com")
+                    mutationDone.signal()
+                }
+                mutationDone.wait(timeout: .now() + 5)
+            }
+            return (MockResponse.httpResponse(statusCode: 401), MockResponse.json(["detail": "Invalid token"]))
+        }
+        defer { MockResponse.tearDown() }
+
+        await expectStaleAuthThrowsNetwork(client: client)
+    }
+
+    @Test func request_403_tokenReplacedInFlight_throwsNetworkWithoutProbe() async {
+        let (client, authState) = MockResponse.makeAPIClient()
+        let mutationDone = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var pingCount = 0
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path == "/api/ping" {
+                pingCount += 1
+                return (MockResponse.httpResponse(statusCode: 200), MockResponse.json(["response": "pong", "user": 1]))
+            }
+            Task { @MainActor in
+                authState.setCredentials(token: "token-B", serverURL: "https://ta.example.com")
+                mutationDone.signal()
+            }
+            mutationDone.wait(timeout: .now() + 5)
+            return (MockResponse.httpResponse(statusCode: 403), MockResponse.json(["detail": "Forbidden"]))
+        }
+        defer { MockResponse.tearDown() }
+
+        await expectStaleAuthThrowsNetwork(client: client)
+        #expect(pingCount == 0, "Stale check must run before the 403 ping probe")
+    }
+
+    @Test func request_401_sameToken_stillUnauthorized() async {
+        let (client, _) = MockResponse.makeAPIClient()
+        MockResponse.setUp(statusCode: 401, json: ["detail": "Invalid token"])
+        defer { MockResponse.tearDown() }
+
+        do {
+            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
+            Issue.record("Expected AppError.unauthorized")
+        } catch let error as AppError {
+            if case .unauthorized = error {} else {
+                Issue.record("Expected .unauthorized, got \(error)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func request_401_noTokenInFlight_skipsStaleCheck() async {
+        // Fixture: serverURL set, token nil — the request goes out without an
+        // Authorization header; sentToken == nil so the stale check is skipped
+        // and the 401 maps to .unauthorized.
+        let keychain = KeychainService()
+        keychain.clearAll()
+        keychain.save("https://ta.example.com", for: .serverURL)
+        let authState = AuthState(keychainService: keychain)
+        let (client, _) = MockResponse.makeAPIClient(authState: authState)
+        MockResponse.setUp(statusCode: 401, json: ["detail": "Invalid token"])
+        defer { MockResponse.tearDown() }
+
+        do {
+            let _: Data = try await client.request(endpoint: .downloadList(page: 1, filter: "pending"))
+            Issue.record("Expected AppError.unauthorized")
+        } catch let error as AppError {
+            if case .unauthorized = error {} else {
+                Issue.record("Expected .unauthorized, got \(error)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
     @Test func request_500_throwsServerError() async {
         let (client, _) = MockResponse.makeAPIClient()
         MockResponse.setUp(statusCode: 500, json: ["detail": "Internal error"])
