@@ -11,7 +11,7 @@ struct VideoListViewModelTests {
         let keychain = KeychainService()
         keychain.clearAll()
         let authState = AuthState(keychainService: keychain)
-        let router = AppRouter(authState: authState)
+        let router = AppRouter(authState: authState, authRepository: MockAuthRepository())
         let vm = VideoListViewModel(videoRepository: videoRepo, authRepository: authRepo, downloadRepository: MockDownloadRepository(), router: router)
         return (vm, router)
     }

@@ -202,7 +202,7 @@ final class MockPlaylistRepository: PlaylistRepositoryProtocol {
 func makeMockRouter() -> (keychain: KeychainService, authState: AuthState, router: AppRouter) {
     let keychain = KeychainService()
     let authState = AuthState(keychainService: keychain)
-    let router = AppRouter(authState: authState)
+    let router = AppRouter(authState: authState, authRepository: MockAuthRepository())
     return (keychain, authState, router)
 }
 

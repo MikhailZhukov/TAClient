@@ -54,7 +54,7 @@ struct RootView: View {
                     .navigationBarTitleDisplayMode(.inline)
             }
             .task {
-                await autoLogin()
+                await router.attemptStartup()
             }
         case .login:
             NavigationStack {
@@ -62,6 +62,12 @@ struct RootView: View {
                     .navigationTitle("Tube Archivist")
                     .navigationBarTitleDisplayMode(.inline)
             }
+        case .unavailable:
+            ReconnectView(
+                serverName: container.authState.serverURL ?? "",
+                retry: { await router.attemptStartup() },
+                changeServer: { router.onAutoLoginFailed() }
+            )
         case .authenticated:
             NavigationStack(path: $router.path) {
                 VideoListScreen { container.makeVideoListViewModel() }
@@ -87,21 +93,7 @@ struct RootView: View {
                             AboutView()
                         }
                     }
+                }
             }
-        }
-    }
-
-    private func autoLogin() async {
-        do {
-            let isValid = try await container.authRepository.ping()
-            if isValid {
-                try? await container.authRepository.fetchUserAccount()
-                router.onLoginSuccess()
-            } else {
-                router.onAutoLoginFailed()
-            }
-        } catch {
-            router.onAutoLoginFailed()
-        }
     }
 }

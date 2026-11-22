@@ -13,7 +13,7 @@ struct VideoDetailViewModelTests {
         let keychain = KeychainService()
         keychain.clearAll()
         let authState = AuthState(keychainService: keychain)
-        let router = AppRouter(authState: authState)
+        let router = AppRouter(authState: authState, authRepository: MockAuthRepository())
         let vm = VideoDetailViewModel(videoId: videoId, videoRepository: videoRepo, authState: authState, router: router)
         return (vm, router)
     }
@@ -191,7 +191,7 @@ struct VideoDetailViewModelTests {
         keychain.clearAll()
         let authState = AuthState(keychainService: keychain)
         authState.setCredentials(token: "test-token", serverURL: "https://example.com")
-        let router = AppRouter(authState: authState)
+        let router = AppRouter(authState: authState, authRepository: MockAuthRepository())
         let repo = MockVideoRepository()
         repo.getVideoHandler = { _ in
             TestData.video(youtubeId: "v1")
@@ -330,7 +330,7 @@ struct VideoDetailViewModelTests {
         keychain.clearAll()
         let authState = AuthState(keychainService: keychain)
         authState.setCredentials(token: "test-token", serverURL: "https://example.com")
-        let router = AppRouter(authState: authState)
+        let router = AppRouter(authState: authState, authRepository: MockAuthRepository())
         let repo = MockVideoRepository()
         let fixture = TestData.video(youtubeId: "v-end", duration: 600)
         repo.getVideoHandler = { _ in fixture }

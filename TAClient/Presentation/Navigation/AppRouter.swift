@@ -1,9 +1,11 @@
 import SwiftUI
+import OSLog
 
 enum AppState {
     case splash
     case login
     case authenticated
+    case unavailable
 }
 
 @Observable
@@ -14,11 +16,14 @@ final class AppRouter {
     private(set) var watchedChanges: [String: Bool] = [:]
 
     private let authState: AuthState
+    private let authRepository: AuthRepositoryProtocol
+    private let logger = Logger(subsystem: "ru.mzhukov.TAClient", category: "AppRouter")
     private var didHandleUnauth: Bool = false
     @ObservationIgnored private var unauthorizedObserver: NSObjectProtocol?
 
-    init(authState: AuthState) {
+    init(authState: AuthState, authRepository: AuthRepositoryProtocol) {
         self.authState = authState
+        self.authRepository = authRepository
         self.appState = authState.isAuthenticated ? .splash : .login
 
         // Subscribe to Data-layer auth failure notifications. The preloader and
@@ -81,6 +86,46 @@ final class AppRouter {
     func onAutoLoginFailed() {
         authState.handleUnauthorized()
         appState = .login
+    }
+
+    /// Server is unreachable (offline, restart, 5xx) — keep credentials
+    /// intact and offer the reconnect screen instead of wiping the session.
+    func onStartupUnavailable() {
+        appState = .unavailable
+    }
+
+    /// Startup sequence, idempotent: safe to call from the `.splash` task and
+    /// from ReconnectView's Retry button. Only `AppError.unauthorized` wipes
+    /// the session; every other ping failure shows `.unavailable`.
+    func attemptStartup() async {
+        do {
+            let isValid = try await authRepository.ping()
+            guard isValid else {
+                onStartupUnavailable()
+                return
+            }
+        } catch {
+            switch StartupOutcome.classify(error) {
+            case .unauthorized:
+                handleUnauthorized()
+            case .unavailable:
+                onStartupUnavailable()
+            }
+            return
+        }
+
+        do {
+            try await authRepository.fetchUserAccount()
+        } catch {
+            if case AppError.unauthorized = error {
+                handleUnauthorized()
+                return
+            }
+            // Server is alive but account fetch failed — preserve the previous
+            // `try?` behavior: continue with reduced privileges (isPrivileged false).
+            logger.error("fetchUserAccount failed after successful ping: \(error). Continuing with reduced privileges.")
+        }
+        onLoginSuccess()
     }
 
     /// Handles errors from async repository calls.

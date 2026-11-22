@@ -106,7 +106,7 @@ struct AuthProxyHandoffTests {
             videoId: "vid1",
             videoRepository: MockVideoRepository(),
             authState: authState,
-            router: AppRouter(authState: authState)
+            router: AppRouter(authState: authState, authRepository: MockAuthRepository())
         )
     }
 
