@@ -284,7 +284,7 @@
 - Modify: `TAClient/Data/Remote/APIClient.swift`
 - Modify: `TAClientTests/APIClientTests.swift`
 
-- [ ] TDD (mutation токена в полёте: в closure-handler — `Task { @MainActor in
+- [x] TDD (mutation токена в полёте: в closure-handler — `Task { @MainActor in
       authState.setCredentials(token: "B", ...) }`, т.к. `AuthState` MainActor-isolated и прямой
       вызов из handler не скомпилируется; детерминизм: мутация встаёт в MainActor FIFO ещё в
       `startLoading`, а доставка ответа клиенту — строго позже; сам handler синхронный — ответ
@@ -296,10 +296,12 @@
       - `authState.token == nil` при запросе → 401 → `sentToken == nil` → stale-чек пропущен →
         `.unauthorized` (реального «запроса без токена при живом токене в authState» из
         `rawRequest` не бывает — login-flow не ходит через `rawRequest`)
-- [ ] Реализовать: в `rawRequest` захватить `sentToken = authState.token` до запроса; при 401/403:
+- [x] Реализовать: в `rawRequest` захватить `sentToken = authState.token` до запроса; при 401/403:
       `if let sentToken, sentToken != authState.token { throw AppError.network(nil) }`
       — **до** 401-маппинга и 403-пробы
-- [ ] Запустить тесты — зелёные, до Task 9 не переходить
+      (проверено в working tree: sentToken @APIClient.swift:72, stale-чек @100 перед 403-пробой @114; 4 теста @APIClientTests.swift:199/221/243/260; `swiftc -frontend -parse` чисто — коммитили в составе Task 4, c54c1e4)
+- [x] Запустить тесты — зелёные, до Task 9 не переходить
+      (note: не автоматизируемо в sandbox — xcodebuild недоступен; синтаксис-проверка пройдена, полный прогон — вручную в Xcode)
 
 ### Task 9: Verify acceptance criteria
 
